@@ -72,8 +72,16 @@ def run():
     time.sleep(1.0)
 
     pshu_log = pshu.cmd('cat /tmp/pshu.log 2>/dev/null || cat /tmp/pshu.stdout 2>/dev/null || true')
-    dsp_count = dsp1.cmd('wc -l /tmp/dsp_messages.jsonl 2>/dev/null | awk "{print $1}"').strip() or '0'
-    ppp_count = ppp1.cmd('wc -l /tmp/ppp_messages.jsonl 2>/dev/null | awk "{print $1}"').strip() or '0'
+    dsp_count_raw = dsp1.cmd("python3 - <<'EOF'\nfrom pathlib import Path\np=Path('/tmp/dsp_messages.jsonl')\nprint(sum(1 for _ in p.open()) if p.exists() else 0)\nEOF").strip()
+    ppp_count_raw = ppp1.cmd("python3 - <<'EOF'\nfrom pathlib import Path\np=Path('/tmp/ppp_messages.jsonl')\nprint(sum(1 for _ in p.open()) if p.exists() else 0)\nEOF").strip()
+
+    def _to_int_safe(v: str) -> int:
+        import re
+        m = re.search(r"(\\d+)", v)
+        return int(m.group(1)) if m else 0
+
+    dsp_count = _to_int_safe(dsp_count_raw)
+    ppp_count = _to_int_safe(ppp_count_raw)
 
     parsed = parse_pshu_log(pshu_log)
     result = {
