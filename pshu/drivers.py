@@ -81,11 +81,14 @@ class EthernetDeviceDriver(BaseDriver):
         started = time.time()
         self.metrics.sent += 1
         payload = json.dumps({"driver": self.name, "command": address, "args": args}, ensure_ascii=False).encode("utf-8")
+        logger.info("TX PREP driver=%s bytes=%s address=%s", self.name, len(payload), address)
         try:
             await self.client.send(payload)
             self.metrics.record_latency(started)
-        except Exception:
+            logger.info("TX OK driver=%s address=%s latency_ms=%.3f", self.name, address, self.metrics.latency_ms[-1])
+        except Exception as exc:
             self.metrics.failed += 1
+            logger.error("TX FAIL driver=%s address=%s err=%s", self.name, address, exc)
             raise
 
 

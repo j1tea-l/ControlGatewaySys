@@ -24,3 +24,11 @@
 ## NTP буфер и синхронизация
 - Добавлен `pshu/ntp_sync.py` для фоновой NTP синхронизации часов (оценка offset + сглаживание EMA).
 - В `OSCGatewayProtocol` добавлен NTP-aware clock и буфер `ntp_buffer_sec` для отложенного исполнения bundle с поправкой времени.
+
+
+## Логирование для Mininet
+- Включено детальное логирование RX/TX и маршрутизации: `ROUTE HIT/MISS`, `OSC MESSAGE`, `BUNDLE`, `TX PREP/OK/FAIL`.
+- Логи пишутся в stdout и `logs/pshu.log` (rotating file).
+
+## Topology для WSL2/Mininet
+- Добавлен `topology.py` с `controller=None` и `switch=OVSBridge` (аналог `--controller=none --switch ovsbr --test pingall`), чтобы избежать 100% packet loss на шаге 13.
