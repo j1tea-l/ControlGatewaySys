@@ -1,0 +1,25 @@
+name: integration-mininet
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+
+jobs:
+  plan-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-osc pyyaml
+      - name: Lint compile
+        run: |
+          python -m py_compile main.py pshu/*.py scripts/osc_loadgen.py
+      - name: Print Mininet TODO
+        run: cat tests/integration/test_mininet_plan.md
