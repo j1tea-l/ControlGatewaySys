@@ -7,6 +7,7 @@ from pshu.metrics import MetricsCollector
 from pshu.ntp_sync import NTPClock, NTPState
 from pshu.logging_setup import setup_logging
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 
 def build_router(config_path: str):
