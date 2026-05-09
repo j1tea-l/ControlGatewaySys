@@ -1,32 +1,17 @@
 {
   "routes": [
     {
-      "prefix": "/device/amp/",
+      "prefix": "/dsp1",
       "route_type": "local",
       "driver": {
-        "name": "AmpZone1",
-        "host": "127.0.0.1",
-        "port": 9001,
+        "name": "dsp1",
+        "host": "10.0.0.3",
+        "port": 9000,
         "protocol": "udp",
         "retry": {
           "timeout_sec": 1.0,
           "retries": 2,
           "retry_backoff_sec": 0.2
-        }
-      }
-    },
-    {
-      "prefix": "/serial/projector/",
-      "route_type": "ppp",
-      "driver": {
-        "name": "PPP1",
-        "host": "127.0.0.1",
-        "port": 9002,
-        "protocol": "tcp",
-        "retry": {
-          "timeout_sec": 1.0,
-          "retries": 3,
-          "retry_backoff_sec": 0.3
         }
       }
     }

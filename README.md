@@ -32,3 +32,18 @@
 
 ## Topology для WSL2/Mininet
 - Добавлен `topology.py` с `controller=None` и `switch=OVSBridge` (аналог `--controller=none --switch ovsbr --test pingall`), чтобы избежать 100% packet loss на шаге 13.
+
+
+## Почему могли не появляться логи
+- Логи пишутся в `logs/pshu.log` и stdout процесса в namespace узла Mininet.
+- При запуске `pshu.cmd('python3 main.py > /tmp/pshu.log 2>&1 &')` проверяйте `/tmp/pshu.log` внутри узла `pshu`.
+
+## Автоинтеграция Mininet
+- Добавлен `tests/integration/mininet_topology.py` (smoke-run с поднятием endpoint на `dsp1`, запуском ПШУ на `pshu`, и loadgen на `controller`).
+- Добавлен `tests/integration/test_metrics_thresholds.py` с assert-порогами метрик.
+- CI workflow запускает Mininet smoke через `sudo` и затем pytest-порогов.
+
+
+## Единый файл запуска Mininet-тестов
+- Используйте `tests/integration/run_mininet_e2e.py` — он **одним запуском** поднимает topology, endpoints (`dsp1`, `ppp1`), стартует ПШУ, отправляет трафик, проверяет маршрутизацию/коммутацию и парсит логи (`ROUTE HIT`, `TX OK`, и т.д.).
+- По завершении формирует отчёт `mininet_e2e_report.json` с метриками доставки и парсингом логов.

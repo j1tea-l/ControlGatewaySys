@@ -39,3 +39,21 @@ class MetricsCollector:
             "heartbeat_failures": self.heartbeat_failures,
             "recovery_p95_ms": sorted(self.recovery_times_ms)[int((len(self.recovery_times_ms)-1)*0.95)] if self.recovery_times_ms else 0.0,
         }
+
+
+    def to_prometheus(self) -> str:
+        snap = self.snapshot()
+        lines = [
+            f"pshu_sent {snap['sent']}",
+            f"pshu_failed {snap['failed']}",
+            f"pshu_loss_rate {snap['loss_rate']}",
+            f"pshu_latency_p95_ms {snap['latency_p95_ms']}",
+            f"pshu_latency_p99_ms {snap['latency_p99_ms']}",
+            f"pshu_heartbeat_failures {snap['heartbeat_failures']}",
+            f"pshu_recovery_p95_ms {snap['recovery_p95_ms']}",
+        ]
+        return "\n".join(lines) + "\n"
+
+    def export_prometheus(self, path: str = "metrics.prom") -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.to_prometheus())
