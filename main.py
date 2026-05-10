@@ -36,31 +36,6 @@ def build_router(config_path: str):
         ntp_clock = NTPClock(NTPState(**{k:v for k,v in ntp.items() if k != "enabled"}))
     return OSCRouter(table), ntp_clock, metrics
 
-def build_router(config_path: str):
-    cfg = load_config(config_path)
-    setup_logging(cfg.get("log_file", "logs/pshu.log"), cfg.get("log_level", "INFO"))
-    routes = parse_routes(cfg)
-    metrics = MetricsCollector()
-    table = {}
-    for route in routes:
-        drv = route.driver
-        policy = RetryPolicy(**drv.get("retry", {}))
-        klass = PPPDriver if route.route_type == "ppp" else EthernetDeviceDriver
-        driver = klass(
-            name=drv["name"],
-            host=drv["host"],
-            port=drv["port"],
-            protocol=drv.get("protocol", "udp"),
-            metrics=metrics,
-            retry_policy=policy,
-        )
-        table[route.prefix] = RouteEntry(prefix=route.prefix, driver=driver, route_type=route.route_type)
-    ntp = parse_ntp(cfg)
-    ntp_clock = None
-    if ntp.get("enabled"):
-        ntp_clock = NTPClock(NTPState(**{k:v for k,v in ntp.items() if k != "enabled"}))
-    return OSCRouter(table), ntp_clock
-
 async def main() -> None:
     router, ntp_clock, metrics = build_router("config.example.json")
     loop = asyncio.get_running_loop()

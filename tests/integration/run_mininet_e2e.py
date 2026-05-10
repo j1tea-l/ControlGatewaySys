@@ -63,7 +63,10 @@ def run():
         net.stop()
         raise SystemExit(f"PSHU failed to start in namespace. Log:\n{startup_log}")
 
-    controller.cmd(f'cd {repo} && python3 scripts/osc_loadgen.py --host 10.0.0.2 --port 8000 --count 20 --mode message')
+    controller.cmd(
+        f'cd {repo} && python3 scripts/osc_loadgen.py '
+        '--host 10.0.0.2 --port 8000 --count 20 --mode message --address /dsp1/cmd'
+    )
     controller.cmd("python3 - <<'EOF'\nfrom pythonosc.udp_client import SimpleUDPClient\nc=SimpleUDPClient('10.0.0.2',8000)\nfor i in range(10):\n c.send_message('/ppp1/cmd',[i])\nEOF")
     time.sleep(1.0)
 
