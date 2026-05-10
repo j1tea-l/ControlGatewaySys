@@ -1,8 +1,14 @@
 from __future__ import annotations
 import json
+import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
+
+logger = logging.getLogger("PSHU_Config")
+
+OSC_PATH_RE = re.compile(r"^/(?:[A-Za-z0-9_.~-]+(?:/[A-Za-z0-9_.~-]+)*)?$")
 
 
 @dataclass
@@ -39,6 +45,7 @@ def parse_routes(cfg: Dict[str, Any]) -> List[RouteConfig]:
         seen[prefix] = i
         route.prefix = prefix
         _validate_driver(route.driver, route.prefix)
+    _validate_route_overlaps(routes)
     return routes
 
 
@@ -56,6 +63,8 @@ def _normalize_prefix(prefix: str) -> str:
         p = p.replace("//", "/")
     if len(p) > 1 and p.endswith("/"):
         p = p[:-1]
+    if not OSC_PATH_RE.match(p):
+        raise ValueError(f"Malformed OSC route prefix: {prefix}")
     return p
 
 
@@ -64,3 +73,15 @@ def _validate_driver(driver: Dict[str, Any], prefix: str) -> None:
     missing = [k for k in required if k not in driver]
     if missing:
         raise ValueError(f"Route {prefix}: missing driver keys: {', '.join(missing)}")
+
+
+def _validate_route_overlaps(routes: List[RouteConfig]) -> None:
+    prefixes = sorted((r.prefix for r in routes), key=len)
+    for i, base in enumerate(prefixes):
+        for other in prefixes[i + 1:]:
+            if other.startswith(base + "/"):
+                logger.warning(
+                    "Route namespace overlap detected: base=%s shadowed_by=%s (longest-prefix will apply)",
+                    base,
+                    other,
+                )

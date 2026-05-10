@@ -38,7 +38,13 @@ class OSCRouter:
     async def route(self, address: str, args: list, timestamp: float) -> None:
         entry = self.resolve(address)
         if not entry:
-            logger.warning("ROUTE MISS address=%s args=%s ts=%.6f", address, args, timestamp)
+            logger.warning(
+                "ROUTE MISS address=%s args=%s ts=%.6f available_routes=%s",
+                address,
+                args,
+                timestamp,
+                self._sorted_prefixes,
+            )
             raise LookupError(address)
         logger.info("ROUTE HIT prefix=%s type=%s address=%s args=%s ts=%.6f", entry.prefix, entry.route_type, address, args, timestamp)
         await entry.driver.send_command(address, args)
