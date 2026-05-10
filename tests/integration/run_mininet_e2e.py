@@ -43,6 +43,11 @@ def _extract_first_int(text: str) -> int:
     m = re.search(r"(\d+)", text)
     return int(m.group(1)) if m else 0
 
+
+def _count_tcpdump_packets(text: str) -> int:
+    # tcpdump packet rows start with epoch timestamp when -tt is used
+    return sum(1 for line in text.splitlines() if re.match(r"^\d+\.\d+\s", line))
+
 def run():
     repo = Path(__file__).resolve().parents[2]
     net = Mininet(controller=None, switch=OVSBridge)
@@ -125,8 +130,8 @@ def run():
 
     pshu_tcpdump = pshu.cmd("cat /tmp/pshu.tcpdump.log 2>/dev/null || true")
     controller_tcpdump = controller.cmd("cat /tmp/controller.tcpdump.log 2>/dev/null || true")
-    pshu_udp_packets = _extract_first_int(pshu.cmd("grep -Eo '([0-9]+) packets captured' /tmp/pshu.tcpdump.log 2>/dev/null || true"))
-    controller_udp_packets = _extract_first_int(controller.cmd("grep -Eo '([0-9]+) packets captured' /tmp/controller.tcpdump.log 2>/dev/null || true"))
+    pshu_udp_packets = _count_tcpdump_packets(pshu_tcpdump)
+    controller_udp_packets = _count_tcpdump_packets(controller_tcpdump)
 
     result = {
         'ping_drop': ping_drop,
