@@ -29,6 +29,20 @@ def _to_int_safe(v: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _count_lines(path: str) -> str:
+    return (
+        "python3 - <<'EOF'\n"
+        "from pathlib import Path\n"
+        f"p=Path('{path}')\n"
+        "print(sum(1 for _ in p.open()) if p.exists() else 0)\n"
+        "EOF"
+    )
+
+
+def _extract_first_int(text: str) -> int:
+    m = re.search(r"(\d+)", text)
+    return int(m.group(1)) if m else 0
+
 def run():
     repo = Path(__file__).resolve().parents[2]
     net = Mininet(controller=None, switch=OVSBridge)
@@ -48,11 +62,16 @@ def run():
     pshu.cmd("rm -f /tmp/pshu.log /tmp/pshu.stdout /tmp/pshu.log.*")
     dsp1.cmd("rm -f /tmp/dsp.log /tmp/dsp_messages.jsonl")
     ppp1.cmd("rm -f /tmp/ppp.log /tmp/ppp_messages.jsonl")
-    controller.cmd("rm -f /tmp/telemetry_sink.log /tmp/controller_telemetry.jsonl")
+    controller.cmd("rm -f /tmp/telemetry_sink.log /tmp/controller_telemetry.jsonl /tmp/controller.tcpdump.log")
+    pshu.cmd("rm -f /tmp/pshu.tcpdump.log")
 
     dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl > /tmp/dsp.log 2>&1 &')
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9001 --out /tmp/ppp_messages.jsonl > /tmp/ppp.log 2>&1 &')
     controller.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/controller_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
+
+    # Real network capture (not app-level counters): sniff OSC/telemetry UDP traffic in namespaces.
+    pshu.cmd("timeout 30 tcpdump -n -tt -l -i any udp and '(port 8000 or port 9100 or port 9200)' > /tmp/pshu.tcpdump.log 2>&1 &")
+    controller.cmd("timeout 30 tcpdump -n -tt -l -i any udp and '(port 8000 or port 9100 or port 9200)' > /tmp/controller.tcpdump.log 2>&1 &")
 
     cfg = {
         "listen_ip": "0.0.0.0",
@@ -94,15 +113,20 @@ def run():
     time.sleep(2.0)
 
     pshu_log = pshu.cmd('cat /tmp/pshu.log 2>/dev/null || cat /tmp/pshu.stdout 2>/dev/null || true')
-    dsp_count_raw = dsp1.cmd("python3 - <<'EOF'\nfrom pathlib import Path\np=Path('/tmp/dsp_messages.jsonl')\nprint(sum(1 for _ in p.open()) if p.exists() else 0)\nEOF").strip()
-    ppp_count_raw = ppp1.cmd("python3 - <<'EOF'\nfrom pathlib import Path\np=Path('/tmp/ppp_messages.jsonl')\nprint(sum(1 for _ in p.open()) if p.exists() else 0)\nEOF").strip()
+    dsp_count_raw = dsp1.cmd(_count_lines('/tmp/dsp_messages.jsonl')).strip()
+    ppp_count_raw = ppp1.cmd(_count_lines('/tmp/ppp_messages.jsonl')).strip()
 
     dsp_count = _to_int_safe(dsp_count_raw)
     ppp_count = _to_int_safe(ppp_count_raw)
-    telemetry_count_raw = controller.cmd("python3 - <<'EOF'\nfrom pathlib import Path\np=Path('/tmp/controller_telemetry.jsonl')\nprint(sum(1 for _ in p.open()) if p.exists() else 0)\nEOF").strip()
+    telemetry_count_raw = controller.cmd(_count_lines('/tmp/controller_telemetry.jsonl')).strip()
     telemetry_count = _to_int_safe(telemetry_count_raw)
     parsed = parse_pshu_log(pshu_log)
     miss_addresses = parse_route_miss_addresses(pshu_log)
+
+    pshu_tcpdump = pshu.cmd("cat /tmp/pshu.tcpdump.log 2>/dev/null || true")
+    controller_tcpdump = controller.cmd("cat /tmp/controller.tcpdump.log 2>/dev/null || true")
+    pshu_udp_packets = _extract_first_int(pshu.cmd("grep -Eo '([0-9]+) packets captured' /tmp/pshu.tcpdump.log 2>/dev/null || true"))
+    controller_udp_packets = _extract_first_int(controller.cmd("grep -Eo '([0-9]+) packets captured' /tmp/controller.tcpdump.log 2>/dev/null || true"))
 
     result = {
         'ping_drop': ping_drop,
@@ -116,6 +140,12 @@ def run():
         'dsp_log_tail': dsp1.cmd('tail -n 30 /tmp/dsp.log 2>/dev/null || true'),
         'ppp_log_tail': ppp1.cmd('tail -n 30 /tmp/ppp.log 2>/dev/null || true'),
         'telemetry_sink_tail': controller.cmd('tail -n 30 /tmp/telemetry_sink.log 2>/dev/null || true'),
+        'network_capture': {
+            'pshu_udp_packets_captured': pshu_udp_packets,
+            'controller_udp_packets_captured': controller_udp_packets,
+            'pshu_tcpdump_tail': '\n'.join(pshu_tcpdump.splitlines()[-40:]),
+            'controller_tcpdump_tail': '\n'.join(controller_tcpdump.splitlines()[-40:]),
+        },
     }
 
     (repo / 'mininet_e2e_report.json').write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
@@ -129,6 +159,8 @@ def run():
         telemetry_count > 0,
         parsed['telemetry_rx'] > 0,
         parsed['telemetry_fwd'] > 0,
+        pshu_udp_packets > 0,
+        controller_udp_packets > 0,
     ])
 
     pshu.cmd('pkill -f "python3 main.py" || true')
@@ -137,6 +169,8 @@ def run():
     controller.cmd('pkill -f "telemetry_sink.py" || true')
     dsp1.cmd('pkill -f "telemetry_gen.py" || true')
     ppp1.cmd('pkill -f "telemetry_gen.py" || true')
+    pshu.cmd('pkill -f "tcpdump -n -tt -l -i any udp" || true')
+    controller.cmd('pkill -f "tcpdump -n -tt -l -i any udp" || true')
     net.stop()
 
     if not ok:
