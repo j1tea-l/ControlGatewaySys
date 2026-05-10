@@ -175,3 +175,24 @@ import pythonosc
 print('deps OK')
 PY
 ```
+
+
+## Телеметрия: OSC over UDP (общий случай)
+- Телеметрия от устройств (DSP, ППП и любые другие) принимается ПШУ как **OSC over UDP** на `telemetry.listen_ip:telemetry.listen_port`.
+- ПШУ не подменяет payload и пересылает исходный OSC datagram на контроллеры из `telemetry.targets`.
+- Поддерживаются OSC-message и OSC-bundle; в логах фиксируются `TELEMETRY RX` и `TELEMETRY FWD`.
+
+### One-file E2E запуск
+Для полного сценария (топология + команды + телеметрия) используется **один файл**:
+
+```bash
+sudo -E python3 tests/integration/run_mininet_e2e.py
+```
+
+Скрипт сам:
+- поднимает Mininet;
+- стартует ПШУ;
+- генерирует OSC-команды и OSC-телеметрию;
+- проверяет доставку на устройства и на telemetry sink контроллера;
+- сохраняет отчёт в `mininet_e2e_report.json`.
+
