@@ -14,6 +14,8 @@ def parse_pshu_log(text: str) -> dict:
         'rx_udp': r'RX UDP',
         'tx_ok': r'TX OK',
         'tx_fail': r'TX FAIL',
+        'telemetry_rx': r'TELEMETRY RX',
+        'telemetry_fwd': r'TELEMETRY FWD',
     }
     return {k: len(re.findall(v, text)) for k, v in patterns.items()}
 
@@ -46,9 +48,11 @@ def run():
     pshu.cmd("rm -f /tmp/pshu.log /tmp/pshu.stdout /tmp/pshu.log.*")
     dsp1.cmd("rm -f /tmp/dsp.log /tmp/dsp_messages.jsonl")
     ppp1.cmd("rm -f /tmp/ppp.log /tmp/ppp_messages.jsonl")
+    controller.cmd("rm -f /tmp/telemetry_sink.log /tmp/controller_telemetry.jsonl")
 
     dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl > /tmp/dsp.log 2>&1 &')
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9001 --out /tmp/ppp_messages.jsonl > /tmp/ppp.log 2>&1 &')
+    controller.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/controller_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
 
     cfg = {
         "listen_ip": "0.0.0.0",
@@ -60,6 +64,14 @@ def run():
             {"prefix": "/dsp1", "route_type": "local", "driver": {"name": "dsp1", "host": "10.0.0.3", "port": 9000, "protocol": "udp", "retry": {"retries": 1}}},
             {"prefix": "/ppp1", "route_type": "ppp", "driver": {"name": "ppp1", "host": "10.0.0.4", "port": 9001, "protocol": "udp", "retry": {"retries": 1}}},
         ],
+        "telemetry": {
+            "enabled": True,
+            "listen_ip": "0.0.0.0",
+            "listen_port": 9100,
+            "targets": [
+                {"name": "controller", "host": "10.0.0.1", "port": 9200}
+            ]
+        }
     }
     (repo / 'config.e2e.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
 
@@ -77,7 +89,9 @@ def run():
         '--host 10.0.0.2 --port 8000 --count 20 --mode message --address /dsp1/cmd'
     )
     controller.cmd("python3 - <<'EOF'\nfrom pythonosc.udp_client import SimpleUDPClient\nc=SimpleUDPClient('10.0.0.2',8000)\nfor i in range(10):\n c.send_message('/ppp1/cmd',[i])\nEOF")
-    time.sleep(1.0)
+    dsp1.cmd(f'cd {repo} && python3 scripts/telemetry_gen.py --host 10.0.0.2 --port 9100 --device dsp1 --count 25 --interval 0.03 > /tmp/dsp_telem.log 2>&1 &')
+    ppp1.cmd(f'cd {repo} && python3 scripts/telemetry_gen.py --host 10.0.0.2 --port 9100 --device ppp1 --metric voltage_v --count 25 --interval 0.03 > /tmp/ppp_telem.log 2>&1 &')
+    time.sleep(2.0)
 
     pshu_log = pshu.cmd('cat /tmp/pshu.log 2>/dev/null || cat /tmp/pshu.stdout 2>/dev/null || true')
     dsp_count_raw = dsp1.cmd("python3 - <<'EOF'\nfrom pathlib import Path\np=Path('/tmp/dsp_messages.jsonl')\nprint(sum(1 for _ in p.open()) if p.exists() else 0)\nEOF").strip()
@@ -85,6 +99,8 @@ def run():
 
     dsp_count = _to_int_safe(dsp_count_raw)
     ppp_count = _to_int_safe(ppp_count_raw)
+    telemetry_count_raw = controller.cmd("python3 - <<'EOF'\nfrom pathlib import Path\np=Path('/tmp/controller_telemetry.jsonl')\nprint(sum(1 for _ in p.open()) if p.exists() else 0)\nEOF").strip()
+    telemetry_count = _to_int_safe(telemetry_count_raw)
     parsed = parse_pshu_log(pshu_log)
     miss_addresses = parse_route_miss_addresses(pshu_log)
 
@@ -92,12 +108,14 @@ def run():
         'ping_drop': ping_drop,
         'dsp_count': dsp_count,
         'ppp_count': ppp_count,
+        'controller_telemetry_count': telemetry_count,
         'log_counts': parsed,
         'route_miss_addresses': miss_addresses,
         'pshu_proc': pshu_proc.strip(),
         'pshu_log_tail': '\n'.join(pshu_log.splitlines()[-30:]),
         'dsp_log_tail': dsp1.cmd('tail -n 30 /tmp/dsp.log 2>/dev/null || true'),
         'ppp_log_tail': ppp1.cmd('tail -n 30 /tmp/ppp.log 2>/dev/null || true'),
+        'telemetry_sink_tail': controller.cmd('tail -n 30 /tmp/telemetry_sink.log 2>/dev/null || true'),
     }
 
     (repo / 'mininet_e2e_report.json').write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
@@ -108,11 +126,17 @@ def run():
         ppp_count > 0,
         parsed['route_hit'] > 0,
         parsed['tx_ok'] > 0,
+        telemetry_count > 0,
+        parsed['telemetry_rx'] > 0,
+        parsed['telemetry_fwd'] > 0,
     ])
 
     pshu.cmd('pkill -f "python3 main.py" || true')
     dsp1.cmd('pkill -f "mock_device_udp.py" || true')
     ppp1.cmd('pkill -f "mock_device_udp.py" || true')
+    controller.cmd('pkill -f "telemetry_sink.py" || true')
+    dsp1.cmd('pkill -f "telemetry_gen.py" || true')
+    ppp1.cmd('pkill -f "telemetry_gen.py" || true')
     net.stop()
 
     if not ok:

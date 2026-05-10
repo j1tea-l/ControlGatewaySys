@@ -8,6 +8,7 @@ from pshu.drivers import EthernetDeviceDriver, PPPDriver, RetryPolicy
 from pshu.metrics import MetricsCollector
 from pshu.ntp_sync import NTPClock, NTPState
 from pshu.logging_setup import setup_logging
+from pshu.telemetry import TelemetryForwardTarget, start_telemetry_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,16 @@ async def main() -> None:
     listen_ip = cfg.get("listen_ip", "0.0.0.0")
     listen_port = cfg.get("listen_port", 8000)
     transport, _ = await loop.create_datagram_endpoint(lambda: OSCGatewayProtocol(router, ntp_clock=ntp_clock), local_addr=(listen_ip, listen_port))
+
+    telemetry_cfg = cfg.get("telemetry", {})
+    telemetry_transport = None
+    if telemetry_cfg.get("enabled", False):
+        targets = [TelemetryForwardTarget(**t) for t in telemetry_cfg.get("targets", [])]
+        telemetry_transport = await start_telemetry_bridge(
+            telemetry_cfg.get("listen_ip", "0.0.0.0"),
+            telemetry_cfg.get("listen_port", 9100),
+            targets,
+        )
     try:
         await asyncio.Event().wait()
     finally:
@@ -54,6 +65,8 @@ async def main() -> None:
         if ntp_task:
             await ntp_task
         transport.close()
+        if telemetry_transport:
+            telemetry_transport.close()
         with contextlib.suppress(Exception):
             metrics.export_prometheus("metrics.prom")
 
