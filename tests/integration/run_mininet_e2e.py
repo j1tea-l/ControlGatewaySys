@@ -18,6 +18,10 @@ def parse_pshu_log(text: str) -> dict:
     return {k: len(re.findall(v, text)) for k, v in patterns.items()}
 
 
+def parse_route_miss_addresses(text: str) -> list[str]:
+    return re.findall(r"ROUTE MISS address=([^ ]+)", text)
+
+
 def _to_int_safe(v: str) -> int:
     m = re.search(r"(\d+)", v)
     return int(m.group(1)) if m else 0
@@ -37,6 +41,11 @@ def run():
 
     net.start()
     ping_drop = net.pingAll()
+
+    # Clear stale artifacts from previous runs to keep counters deterministic.
+    pshu.cmd("rm -f /tmp/pshu.log /tmp/pshu.stdout /tmp/pshu.log.*")
+    dsp1.cmd("rm -f /tmp/dsp.log /tmp/dsp_messages.jsonl")
+    ppp1.cmd("rm -f /tmp/ppp.log /tmp/ppp_messages.jsonl")
 
     dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl > /tmp/dsp.log 2>&1 &')
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9001 --out /tmp/ppp_messages.jsonl > /tmp/ppp.log 2>&1 &')
@@ -63,7 +72,10 @@ def run():
         net.stop()
         raise SystemExit(f"PSHU failed to start in namespace. Log:\n{startup_log}")
 
-    controller.cmd(f'cd {repo} && python3 scripts/osc_loadgen.py --host 10.0.0.2 --port 8000 --count 20 --mode message')
+    controller.cmd(
+        f'cd {repo} && python3 scripts/osc_loadgen.py '
+        '--host 10.0.0.2 --port 8000 --count 20 --mode message --address /dsp1/cmd'
+    )
     controller.cmd("python3 - <<'EOF'\nfrom pythonosc.udp_client import SimpleUDPClient\nc=SimpleUDPClient('10.0.0.2',8000)\nfor i in range(10):\n c.send_message('/ppp1/cmd',[i])\nEOF")
     time.sleep(1.0)
 
@@ -74,12 +86,14 @@ def run():
     dsp_count = _to_int_safe(dsp_count_raw)
     ppp_count = _to_int_safe(ppp_count_raw)
     parsed = parse_pshu_log(pshu_log)
+    miss_addresses = parse_route_miss_addresses(pshu_log)
 
     result = {
         'ping_drop': ping_drop,
         'dsp_count': dsp_count,
         'ppp_count': ppp_count,
         'log_counts': parsed,
+        'route_miss_addresses': miss_addresses,
         'pshu_proc': pshu_proc.strip(),
         'pshu_log_tail': '\n'.join(pshu_log.splitlines()[-30:]),
         'dsp_log_tail': dsp1.cmd('tail -n 30 /tmp/dsp.log 2>/dev/null || true'),

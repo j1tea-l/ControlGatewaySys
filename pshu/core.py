@@ -25,20 +25,38 @@ class RouteEntry:
 class OSCRouter:
     def __init__(self, routing_table: Dict[str, RouteEntry]):
         self.routing_table = routing_table
+        self._sorted_prefixes = sorted(self.routing_table.keys(), key=len, reverse=True)
+        logger.info("ROUTE TABLE size=%s prefixes=%s", len(self._sorted_prefixes), self._sorted_prefixes)
 
     def resolve(self, address: str) -> Optional[RouteEntry]:
-        for prefix in sorted(self.routing_table.keys(), key=len, reverse=True):
-            if address.startswith(prefix):
+        normalized = self._normalize_address(address)
+        for prefix in self._sorted_prefixes:
+            if normalized == prefix or normalized.startswith(prefix + "/"):
                 return self.routing_table[prefix]
         return None
 
     async def route(self, address: str, args: list, timestamp: float) -> None:
         entry = self.resolve(address)
         if not entry:
-            logger.warning("ROUTE MISS address=%s args=%s ts=%.6f", address, args, timestamp)
+            logger.warning(
+                "ROUTE MISS address=%s args=%s ts=%.6f available_routes=%s",
+                address,
+                args,
+                timestamp,
+                self._sorted_prefixes,
+            )
             raise LookupError(address)
         logger.info("ROUTE HIT prefix=%s type=%s address=%s args=%s ts=%.6f", entry.prefix, entry.route_type, address, args, timestamp)
         await entry.driver.send_command(address, args)
+
+    @staticmethod
+    def _normalize_address(address: str) -> str:
+        p = address.strip()
+        while "//" in p:
+            p = p.replace("//", "/")
+        if len(p) > 1 and p.endswith("/"):
+            p = p[:-1]
+        return p
 
 
 class OSCGatewayProtocol(asyncio.DatagramProtocol):
