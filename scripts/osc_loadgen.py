@@ -25,13 +25,14 @@ async def main():
     p.add_argument("--port", type=int, default=8000)
     p.add_argument("--count", type=int, default=100)
     p.add_argument("--mode", choices=["message", "bundle"], default="message")
+    p.add_argument("--address", default="/device/amp/gain")
     args = p.parse_args()
     client = SimpleUDPClient(args.host, args.port)
     for i in range(args.count):
         if args.mode == "message":
-            send_message(client, "/device/amp/gain", i)
+            send_message(client, args.address, i)
         else:
-            send_bundle(client, "/device/amp/gain", i, 0.1)
+            send_bundle(client, args.address, i, 0.1)
         await asyncio.sleep(0.01)
 
 
