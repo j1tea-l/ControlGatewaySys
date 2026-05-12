@@ -23,14 +23,20 @@ def build_router(config_path: str):
         drv = route.driver
         policy = RetryPolicy(**drv.get("retry", {}))
         klass = PPPDriver if route.route_type == "ppp" else EthernetDeviceDriver
-        driver = klass(
-            name=drv["name"],
-            host=drv["host"],
-            port=drv["port"],
-            protocol=drv.get("protocol", "udp"),
-            metrics=metrics,
-            retry_policy=policy,
-        )
+        driver_kwargs = {
+            "name": drv["name"],
+            "host": drv["host"],
+            "port": drv["port"],
+            "protocol": drv.get("protocol", "udp"),
+            "metrics": metrics,
+            "retry_policy": policy,
+            "route_prefix": route.prefix,
+            "output_mode": drv.get("output_mode", "json"),
+            "mapping_rules": drv.get("mapping_rules", {}),
+        }
+        if klass is PPPDriver:
+            driver_kwargs["ppp_profile"] = drv.get("ppp_profile", {})
+        driver = klass(**driver_kwargs)
         table[route.prefix] = RouteEntry(prefix=route.prefix, driver=driver, route_type=route.route_type)
     ntp = parse_ntp(cfg)
     ntp_clock = None
@@ -69,6 +75,7 @@ async def main() -> None:
             telemetry_cfg.get("listen_ip", "0.0.0.0"),
             telemetry_cfg.get("listen_port", 9100),
             targets,
+            transport=telemetry_cfg.get("transport", "udp"),
         )
     try:
         await asyncio.Event().wait()
@@ -79,6 +86,8 @@ async def main() -> None:
         transport.close()
         if telemetry_transport:
             telemetry_transport.close()
+            if hasattr(telemetry_transport, "wait_closed"):
+                await telemetry_transport.wait_closed()
         with contextlib.suppress(Exception):
             metrics.export_prometheus("metrics.prom")
 
