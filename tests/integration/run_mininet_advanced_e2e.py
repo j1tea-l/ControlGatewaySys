@@ -139,4 +139,12 @@ c.send(bundle.build())
 
     # БЕЗОПАСНАЯ ОЧИСТКА (без pkill -f python)
     pshu.cmd('pkill -f "python3 main.py" || true')
-    dsp1.cmd('pkill -f "mock_device_
+    dsp1.cmd('pkill -f "mock_device_udp.py" || true')
+    ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
+    dsp1.cmd('pkill -f "telemetry_gen.py" || true')
+    client.cmd('pkill -f "telemetry_sink.py" || true')
+    client.cmd('pkill -f tcpdump || true')
+    net.stop()
+
+if __name__ == '__main__':
+    run()
