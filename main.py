@@ -8,6 +8,7 @@ from pshu.drivers import EthernetDeviceDriver, PPPDriver, RetryPolicy
 from pshu.metrics import MetricsCollector
 from pshu.ntp_sync import NTPClock, NTPState
 from pshu.logging_setup import setup_logging
+from pshu.telemetry import TelemetryForwardTarget, start_telemetry_bridge
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +22,20 @@ def build_router(config_path: str):
         drv = route.driver
         policy = RetryPolicy(**drv.get("retry", {}))
         klass = PPPDriver if route.route_type == "ppp" else EthernetDeviceDriver
-        driver = klass(
-            name=drv["name"],
-            host=drv["host"],
-            port=drv["port"],
-            protocol=drv.get("protocol", "udp"),
-            metrics=metrics,
-            retry_policy=policy,
-        )
+        driver_kwargs = {
+            "name": drv["name"],
+            "host": drv["host"],
+            "port": drv["port"],
+            "protocol": drv.get("protocol", "udp"),
+            "metrics": metrics,
+            "retry_policy": policy,
+            "route_prefix": route.prefix,
+            "output_mode": drv.get("output_mode", "json"),
+            "mapping_rules": drv.get("mapping_rules", {}),
+        }
+        if klass is PPPDriver:
+            driver_kwargs["ppp_profile"] = drv.get("ppp_profile", {})
+        driver = klass(**driver_kwargs)
         table[route.prefix] = RouteEntry(prefix=route.prefix, driver=driver, route_type=route.route_type)
     ntp = parse_ntp(cfg)
     ntp_clock = None
@@ -47,6 +54,17 @@ async def main() -> None:
     listen_ip = cfg.get("listen_ip", "0.0.0.0")
     listen_port = cfg.get("listen_port", 8000)
     transport, _ = await loop.create_datagram_endpoint(lambda: OSCGatewayProtocol(router, ntp_clock=ntp_clock), local_addr=(listen_ip, listen_port))
+
+    telemetry_cfg = cfg.get("telemetry", {})
+    telemetry_transport = None
+    if telemetry_cfg.get("enabled", False):
+        targets = [TelemetryForwardTarget(**t) for t in telemetry_cfg.get("targets", [])]
+        telemetry_transport = await start_telemetry_bridge(
+            telemetry_cfg.get("listen_ip", "0.0.0.0"),
+            telemetry_cfg.get("listen_port", 9100),
+            targets,
+            transport=telemetry_cfg.get("transport", "udp"),
+        )
     try:
         await asyncio.Event().wait()
     finally:
@@ -54,6 +72,10 @@ async def main() -> None:
         if ntp_task:
             await ntp_task
         transport.close()
+        if telemetry_transport:
+            telemetry_transport.close()
+            if hasattr(telemetry_transport, "wait_closed"):
+                await telemetry_transport.wait_closed()
         with contextlib.suppress(Exception):
             metrics.export_prometheus("metrics.prom")
 
