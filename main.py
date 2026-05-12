@@ -7,6 +7,7 @@ from pshu.core import OSCGatewayProtocol, OSCRouter, RouteEntry
 from pshu.drivers import EthernetDeviceDriver, PPPDriver, RetryPolicy
 from pshu.metrics import MetricsCollector
 from pshu.ntp_sync import NTPClock, NTPState
+from pshu.rtc_clock import RPIRTCClock, RTCState, is_raspberry_pi
 from pshu.logging_setup import setup_logging
 from pshu.telemetry import TelemetryForwardTarget, start_telemetry_bridge
 
@@ -34,7 +35,18 @@ def build_router(config_path: str):
     ntp = parse_ntp(cfg)
     ntp_clock = None
     if ntp.get("enabled"):
-        ntp_clock = NTPClock(NTPState(**{k:v for k,v in ntp.items() if k != "enabled"}))
+        if ntp.get("use_rpi_rtc") and is_raspberry_pi():
+            ntp_clock = RPIRTCClock(
+                RTCState(
+                    poll_interval_sec=ntp.get("poll_interval_sec", 30.0),
+                    timeout_sec=ntp.get("timeout_sec", 1.0),
+                    hwclock_bin=ntp.get("hwclock_bin", "hwclock"),
+                )
+            )
+            logger.info("Clock source selected: RPi RTC")
+        else:
+            ntp_clock = NTPClock(NTPState(**{k: v for k, v in ntp.items() if k not in {"enabled", "use_rpi_rtc", "hwclock_bin"}}))
+            logger.info("Clock source selected: NTP server=%s", ntp.get("server"))
     return OSCRouter(table), ntp_clock, metrics
 
 async def main() -> None:

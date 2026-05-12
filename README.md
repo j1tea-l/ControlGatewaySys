@@ -176,23 +176,47 @@ print('deps OK')
 PY
 ```
 
+## RTC clock source для Raspberry Pi
 
-## Телеметрия: OSC over UDP (общий случай)
-- Телеметрия от устройств (DSP, ППП и любые другие) принимается ПШУ как **OSC over UDP** на `telemetry.listen_ip:telemetry.listen_port`.
-- ПШУ не подменяет payload и пересылает исходный OSC datagram на контроллеры из `telemetry.targets`.
-- Поддерживаются OSC-message и OSC-bundle; в логах фиксируются `TELEMETRY RX` и `TELEMETRY FWD`.
+Для снижения риска рассинхронизации команд/телеметрии на реальном RPi добавлена поддержка RTC-источника времени.
 
-### One-file E2E запуск
-Для полного сценария (топология + команды + телеметрия) используется **один файл**:
+- В `ntp.enabled=true` можно включить синхронизацию времени для bundle scheduling.
+- Если задано `ntp.use_rpi_rtc=true` **и** процесс запущен на Raspberry Pi (детект по device-tree model), ПШУ использует `RPIRTCClock` (`hwclock --get --utc`) как источник поправки часов.
+- Если `use_rpi_rtc=true`, но платформа не RPi — автоматически используется обычный `NTPClock` (без аварийного падения).
 
-```bash
-sudo -E python3 tests/integration/run_mininet_e2e.py
+Пример конфигурации:
+
+```json
+{
+  "ntp": {
+    "enabled": true,
+    "use_rpi_rtc": true,
+    "poll_interval_sec": 30.0,
+    "timeout_sec": 1.0,
+    "hwclock_bin": "hwclock",
+    "server": "pool.ntp.org",
+    "alpha": 0.2
+  }
+}
 ```
 
-Скрипт сам:
-- поднимает Mininet;
-- стартует ПШУ;
-- генерирует OSC-команды и OSC-телеметрию;
-- проверяет доставку на устройства и на telemetry sink контроллера;
-- сохраняет отчёт в `mininet_e2e_report.json`.
+## Роль драйверов и как писать драйвер под конкретное устройство
 
+Драйвер в ПШУ — это адаптер между универсальной OSC-командой и протоколом конкретного устройства.
+
+Базовые обязанности драйвера:
+1. Принять `address` + `args` от роутера.
+2. Преобразовать в протокол устройства (JSON/ASCII/Binary/PPP frame/RS485 packet).
+3. Отправить через транспорт (UDP/TCP/serial).
+4. Вернуть статус, обновить метрики, залогировать TX/RX.
+
+Рекомендуемый шаблон production-драйвера:
+- `DeviceCodec`: сериализация/десериализация команд и телеметрии.
+- `Transport`: устойчивое соединение, timeout/retry/reconnect, буферизация.
+- `Driver`: оркестрация команды, healthcheck, telemetry polling.
+
+Практика реализации:
+- Не хардкодить адреса OSC внутри драйвера: использовать route-prefix + конфиг.
+- Поддерживать идемпотентные retry для команд, где это безопасно.
+- Разделять transport errors и protocol errors в логах/метриках.
+- Для RS232/RS485 проектировать framing+parser FSM отдельно от бизнес-логики.
