@@ -8,13 +8,14 @@ from mininet.node import OVSBridge
 from mininet.link import TCLink
 
 def _count_lines(path: str) -> str:
-    return (
-        "python3 - <<'EOF'\n"
-        "from pathlib import Path\n"
-        f"p=Path('{path}')\n"
-        "print(sum(1 for _ in p.open()) if p.exists() else 0)\n"
-        "EOF"
-    )
+    # Заменяем многострочный Python-скрипт на простой однострочный bash-пайплайн,
+    # чтобы избежать вывода символов PS2 ('>') от heredoc.
+    return f"cat {path} 2>/dev/null | wc -l"
+
+def _to_int_safe(v: str) -> int:
+    # Безопасное извлечение первого найденного числа из строки, игнорируя мусор
+    m = re.search(r"(\d+)", v)
+    return int(m.group(1)) if m else 0
 
 def run():
     repo = Path(__file__).resolve().parents[2]
@@ -140,9 +141,9 @@ print(f"SENT BUNDLE: target_time={target_time}")
             'log_evidence': [line for line in pshu_log.split('\n') if 'BUNDLE' in line]
         },
         'routing_and_telemetry': {
-            'dsp_received_count': int(dsp1.cmd(_count_lines('/tmp/dsp_messages.jsonl')).strip() or 0),
-            'ppp_received_count': int(ppp1.cmd(_count_lines('/tmp/ppp_messages.jsonl')).strip() or 0),
-            'client_telemetry_count': int(client.cmd(_count_lines('/tmp/client_telemetry.jsonl')).strip() or 0)
+            'dsp_received_count': _to_int_safe(dsp1.cmd(_count_lines('/tmp/dsp_messages.jsonl'))),
+            'ppp_received_count': _to_int_safe(ppp1.cmd(_count_lines('/tmp/ppp_messages.jsonl'))),
+            'client_telemetry_count': _to_int_safe(client.cmd(_count_lines('/tmp/client_telemetry.jsonl')))
         }
     }
 
