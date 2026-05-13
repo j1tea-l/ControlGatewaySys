@@ -12,6 +12,8 @@ from typing import Optional, Any, TYPE_CHECKING
 from pythonosc.osc_message_builder import OscMessageBuilder
 
 from pshu.metrics import MetricsCollector
+
+# Импортируем HeartbeatManager для аннотаций типов, избегая циклических импортов
 if TYPE_CHECKING:
     from pshu.heartbeat import HeartbeatManager
 
@@ -111,11 +113,11 @@ class EthernetDeviceDriver(BaseDriver):
         route_prefix: str, 
         output_mode: str = "json", 
         mapping_rules: Optional[dict[str, Any]] = None,
-        heartbeat: Optional['HeartbeatManager'] = None  # Добавлен интеграционный параметр
+        heartbeat: Optional['HeartbeatManager'] = None
     ):
         self.name = name
         self.metrics = metrics
-        self.protocol = protocol
+        self.protocol = protocol.lower()
         self.route_prefix = route_prefix
         self.output_mode = output_mode
         self.mapping_rules = mapping_rules or {}
@@ -123,11 +125,9 @@ class EthernetDeviceDriver(BaseDriver):
         self.udp_client = UDPCommandClient(host, port, retry_policy)
         self.tcp_client = TCPCommandClient(host, port, retry_policy)
         
-        # Интеграция с подсистемой Heartbeat
         self.heartbeat = heartbeat
         self.dev_state = None
         if self.heartbeat:
-            # Регистрируем устройство для фонового мониторинга
             self.dev_state = self.heartbeat.register(name, host, port, protocol)
 
     def _encode_payload(self, address: str, args: list) -> bytes:
@@ -151,8 +151,9 @@ class EthernetDeviceDriver(BaseDriver):
         return payload
 
     async def send_command(self, address: str, args: list) -> None:
-        # Механизм Fast-Fail: отбрасываем команду сразу, если мониторинг признал узел недоступным
-        if self.dev_state and not self.dev_state.is_online:
+        # ИСПРАВЛЕНИЕ: Fast-Fail теперь применяется ТОЛЬКО для TCP устройств.
+        # Для UDP (fire-and-forget) мы всегда отправляем пакет.
+        if self.protocol == "tcp" and self.dev_state and not self.dev_state.is_online:
             self.metrics.failed += 1
             logger.warning("TX ABORT driver=%s address=%s: узел в статусе OFFLINE", self.name, address)
             raise ConnectionError(f"Узел {self.name} недоступен (OFFLINE)")
@@ -174,7 +175,7 @@ class EthernetDeviceDriver(BaseDriver):
             self.metrics.record_latency(started)
             logger.info("TX OK driver=%s address=%s latency_ms=%.3f", self.name, address, self.metrics.latency_ms[-1])
             
-            # Подтверждаем активность узла при успешной отправке
+            # Подтверждаем активность узла при успешной отправке (даже если он был OFFLINE по UDP)
             if self.dev_state:
                 self.dev_state.mark_seen()
                 
@@ -190,12 +191,10 @@ class PPPDriver(EthernetDeviceDriver):
         self.ppp_profile = ppp_profile or {}
         self._profile_sent = False
         
-        # Привязываем коллбэк для автоматического восстановления логического состояния
         if self.dev_state:
             self.dev_state.on_reconnect = self._on_reconnect
 
     async def _on_reconnect(self) -> None:
-        """Сброс флага профиля после физического переподключения TCP-сокета ППП."""
         logger.info("Сброс профиля для ППП '%s'. Будет отправлен заново при следующей команде.", self.name)
         self._profile_sent = False
 
@@ -210,7 +209,5 @@ class PPPDriver(EthernetDeviceDriver):
         self._profile_sent = True
 
     async def send_command(self, address: str, args: list) -> None:
-        # Fast-Fail проверка унаследована от EthernetDeviceDriver, 
-        # поэтому если узел OFFLINE, до _push_profile_once дело даже не дойдет.
         await self._push_profile_once()
         await super().send_command(address, args)
