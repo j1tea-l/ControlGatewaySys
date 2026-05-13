@@ -45,14 +45,17 @@ def run():
     client.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/client_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
     client.cmd("tcpdump -i any -n -tt -w /tmp/client_capture.pcap udp port 8000 or udp port 9100 or udp port 9200 > /dev/null 2>&1 &")
 
-    # Встроенный фейковый NTP-сервер на хосте client (10.0.0.1)
-    ntp_server_script = """
+    # Изолированный NTP сервер без конфликтов с chronyd (порт 12345)
+    fake_ntp_code = """
 import socket
 import struct
 import time
+
 NTP_EPOCH_OFFSET = 2208988800
+
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind(('0.0.0.0', 123))
+sock.bind(('0.0.0.0', 12345))
+
 while True:
     try:
         data, addr = sock.recvfrom(1024)
@@ -61,14 +64,17 @@ while True:
             ntp_time = now + NTP_EPOCH_OFFSET
             sec = int(ntp_time)
             frac = int((ntp_time - sec) * (2**32))
+            
             resp = bytearray(48)
-            resp[0] = 0x24  # Leap indicator 0, Version 4, Mode 4 (Server)
+            resp[0] = 0x24
             struct.pack_into("!II", resp, 40, sec, frac)
+            
             sock.sendto(resp, addr)
     except Exception:
         pass
 """
-    client.cmd(f"python3 -c \"{ntp_server_script.strip()}\" > /tmp/ntp_server.log 2>&1 &")
+    (repo / 'fake_ntp.py').write_text(fake_ntp_code, encoding='utf-8')
+    client.cmd(f'python3 {repo}/fake_ntp.py > /tmp/ntp_server.log 2>&1 &')
 
     print("[3/6] Запуск подсистемы шлюза управления (ПШУ)...")
     cfg = {
@@ -79,7 +85,7 @@ while True:
         "ntp": {
             "enabled": True,
             "server": "10.0.0.1",
-            "port": 123,
+            "port": 12345, # Используем безопасный порт
             "poll_interval_sec": 2.0,
             "timeout_sec": 1.0,
             "alpha": 0.5
@@ -96,7 +102,6 @@ while True:
     (repo / 'config.e2e.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
     pshu.cmd(f'cd {repo} && cp config.e2e.json config.example.json && python3 main.py > /tmp/pshu.stdout 2>&1 &')
     
-    # Даем ПШУ время на запуск и синхронизацию с локальным NTP
     time.sleep(4.0)
 
     print("[4/6] Тест №1 и №2: Синхронизация (OSC Bundle) и Телеметрия...")
@@ -198,21 +203,8 @@ c.send(bundle.build())
     print(client.cmd('tcpdump -r /tmp/client_capture.pcap -n -tt -c 15 2>/dev/null || true').strip())
     print("="*80 + "\n")
 
-    result = {
-        'network_delays': {'client_to_pshu_link': '5ms+2ms', 'pshu_to_dsp_link': '2ms+10ms'},
-        'sync_system_test': {'ntp_synced': ntp_synced, 'latency_ms': round(sync_delta_ms, 2)},
-        'heartbeat_test': {
-            'dropped_detected': heartbeat_dropped, 
-            'recovered': heartbeat_recovered,
-            'profile_repushed': profile_pushed_again,
-            'command_delivered': recovery_cmd_delivered
-        },
-        'routing_and_telemetry': {'dsp_count': dsp_count, 'telem_count': telem_count}
-    }
-    (repo / 'mininet_advanced_report.json').write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
-
     pshu.cmd('pkill -f "python3 main.py" || true')
-    client.cmd('pkill -f "ntp_server" || true')
+    client.cmd('pkill -f "fake_ntp.py" || true')
     dsp1.cmd('pkill -f "mock_device_udp.py" || true')
     ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
     dsp1.cmd('pkill -f "telemetry_gen.py" || true')
