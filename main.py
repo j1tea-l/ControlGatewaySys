@@ -10,15 +10,19 @@ from pshu.ntp_sync import NTPClock, NTPState
 from pshu.rtc_clock import RPIRTCClock, RTCState, is_raspberry_pi
 from pshu.logging_setup import setup_logging
 from pshu.telemetry import TelemetryForwardTarget, start_telemetry_bridge
+from pshu.heartbeat import HeartbeatManager
 
 logger = logging.getLogger(__name__)
 
 def build_router(config_path: str):
     cfg = load_config(config_path)
     setup_logging(cfg.get("log_file", "logs/pshu.log"), cfg.get("log_level", "INFO"))
+    
     routes = parse_routes(cfg)
     metrics = MetricsCollector()
+    heartbeat_mgr = HeartbeatManager(check_interval=1.0)
     table = {}
+    
     for route in routes:
         drv = route.driver
         policy = RetryPolicy(**drv.get("retry", {}))
@@ -33,11 +37,15 @@ def build_router(config_path: str):
             "route_prefix": route.prefix,
             "output_mode": drv.get("output_mode", "json"),
             "mapping_rules": drv.get("mapping_rules", {}),
+            "heartbeat": heartbeat_mgr, # Интеграция Heartbeat в драйвер
         }
+        
         if klass is PPPDriver:
             driver_kwargs["ppp_profile"] = drv.get("ppp_profile", {})
+            
         driver = klass(**driver_kwargs)
         table[route.prefix] = RouteEntry(prefix=route.prefix, driver=driver, route_type=route.route_type)
+        
     ntp = parse_ntp(cfg)
     ntp_clock = None
     if ntp.get("enabled"):
@@ -53,19 +61,26 @@ def build_router(config_path: str):
         else:
             ntp_clock = NTPClock(NTPState(**{k: v for k, v in ntp.items() if k not in {"enabled", "use_rpi_rtc", "hwclock_bin"}}))
             logger.info("Clock source selected: NTP server=%s", ntp.get("server"))
-    return OSCRouter(table), ntp_clock, metrics
+            
+    return OSCRouter(table), ntp_clock, metrics, heartbeat_mgr
 
 async def main() -> None:
-    router, ntp_clock, metrics = build_router("config.example.json")
+    router, ntp_clock, metrics, heartbeat = build_router("config.example.json")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
+    
     ntp_task = None
     if ntp_clock:
         ntp_task = asyncio.create_task(ntp_clock.run(stop_event))
+        
     cfg = load_config("config.example.json")
     listen_ip = cfg.get("listen_ip", "0.0.0.0")
     listen_port = cfg.get("listen_port", 8000)
-    transport, _ = await loop.create_datagram_endpoint(lambda: OSCGatewayProtocol(router, ntp_clock=ntp_clock), local_addr=(listen_ip, listen_port))
+    
+    transport, _ = await loop.create_datagram_endpoint(
+        lambda: OSCGatewayProtocol(router, ntp_clock=ntp_clock), 
+        local_addr=(listen_ip, listen_port)
+    )
 
     telemetry_cfg = cfg.get("telemetry", {})
     telemetry_transport = None
@@ -76,18 +91,28 @@ async def main() -> None:
             telemetry_cfg.get("listen_port", 9100),
             targets,
             transport=telemetry_cfg.get("transport", "udp"),
+            heartbeat=heartbeat # Интеграция Heartbeat в мост телеметрии
         )
+        
+    # Запуск фонового мониторинга соединений
+    await heartbeat.start()
+
     try:
         await asyncio.Event().wait()
     finally:
         stop_event.set()
+        await heartbeat.stop()
+        
         if ntp_task:
             await ntp_task
+            
         transport.close()
+        
         if telemetry_transport:
             telemetry_transport.close()
             if hasattr(telemetry_transport, "wait_closed"):
                 await telemetry_transport.wait_closed()
+                
         with contextlib.suppress(Exception):
             metrics.export_prometheus("metrics.prom")
 
