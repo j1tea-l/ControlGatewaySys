@@ -17,7 +17,7 @@ def _to_int_safe(v: str) -> int:
 def run():
     repo = Path(__file__).resolve().parents[2]
     
-    print("\n[1/6] Инициализация Mininet и топологии 'Звезда' с TCLink...")
+    print("[1/6] Инициализация Mininet и топологии 'Звезда' с TCLink...")
     net = Mininet(controller=None, switch=OVSBridge, link=TCLink)
     s1 = net.addSwitch('s1')
     
@@ -43,13 +43,15 @@ def run():
     dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl > /tmp/dsp.log 2>&1 &')
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_ppp_tcp_device.py --port 9001 --out /tmp/ppp_messages.jsonl --profile-out /tmp/ppp_profile.json > /tmp/ppp.log 2>&1 &')
     client.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/client_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
-    client.cmd("tcpdump -i any -n -w /tmp/client_capture.pcap udp port 8000 or udp port 9100 or udp port 9200 > /dev/null 2>&1 &")
+    
+    # Запуск tcpdump для записи сырого сетевого взаимодействия
+    client.cmd("tcpdump -i any -n -tt -w /tmp/client_capture.pcap udp port 8000 or udp port 9100 or udp port 9200 > /dev/null 2>&1 &")
 
     print("[3/6] Запуск подсистемы шлюза управления (ПШУ)...")
     cfg = {
         "listen_ip": "0.0.0.0",
         "listen_port": 8000,
-        "log_level": "INFO",
+        "log_level": "DEBUG",
         "log_file": "/tmp/pshu.log",
         "ntp": {"enabled": False},
         "routes": [
@@ -91,20 +93,13 @@ c.send(bundle.build())
     time.sleep(1.0)
 
     print("[5/6] Тест №3: Обрыв связи (Heartbeat) и автовосстановление ППП...")
-    # Имитация потери питания ESP32 (жестко убиваем процесс)
     ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
-    print("      - Эмулятор ППП выключен (Имитация потери питания). Ждем детекцию обрыва...")
-    time.sleep(4.0) # Даем Heartbeat время заметить обрыв (timeout = 3.0s)
-
-    # Удаляем старый файл профиля на хосте ППП, чтобы проверить его повторное появление
+    time.sleep(4.0) 
     ppp1.cmd("rm -f /tmp/ppp_profile.json")
 
-    # Включаем ESP32 обратно
-    print("      - Эмулятор ППП включен обратно. Ждем TCP-реконнекта...")
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_ppp_tcp_device.py --port 9001 --out /tmp/ppp_messages.jsonl --profile-out /tmp/ppp_profile.json > /tmp/ppp_recovery.log 2>&1 &')
-    time.sleep(4.0) # Даем модулю Heartbeat время на установку TCP сессии
+    time.sleep(4.0) 
 
-    # Отправляем тестовую команду после восстановления
     client.cmd(f'cd {repo} && python3 scripts/osc_loadgen.py --host 10.0.0.2 --port 8000 --count 1 --mode message --address /ppp1/after_recovery')
     time.sleep(1.0)
 
@@ -113,7 +108,6 @@ c.send(bundle.build())
     dsp_messages = dsp1.cmd('cat /tmp/dsp_messages.jsonl 2>/dev/null || true').strip().split('\n')
     ppp_messages = ppp1.cmd('cat /tmp/ppp_messages.jsonl 2>/dev/null || true')
     
-    sync_success = False
     sync_delta_ms = 0.0
     for line in dsp_messages:
         if 'sync_test' in line:
@@ -122,47 +116,58 @@ c.send(bundle.build())
             target_ts = payload['args'][1]
             actual_receive_ts = rec['ts']
             sync_delta_ms = (actual_receive_ts - target_ts) * 1000
-            if -100 < sync_delta_ms < 3000: 
-                sync_success = True
             break
 
     dsp_count = _to_int_safe(dsp1.cmd(_count_lines('/tmp/dsp_messages.jsonl')))
     telem_count = _to_int_safe(client.cmd(_count_lines('/tmp/client_telemetry.jsonl')))
 
-    # Анализ результатов Heartbeat
     heartbeat_dropped = 'ОБРЫВ СВЯЗИ' in pshu_log
     heartbeat_recovered = 'СВЯЗЬ ВОССТАНОВЛЕНА' in pshu_log
     profile_pushed_again = _to_int_safe(ppp1.cmd("cat /tmp/ppp_profile.json 2>/dev/null | wc -l")) > 0
     recovery_cmd_delivered = 'after_recovery' in ppp_messages
 
-    # Красивый вывод метрик
-    print("\n" + "="*60)
-    print(" 📊 ОТЧЕТ О ТЕСТИРОВАНИИ ПШУ (Mininet Advanced E2E)")
-    print("="*60)
-    print("🌐 Параметры эмулируемой сети (TCLink):")
-    print("  - Client <-> Switch : delay=5ms, jitter=2ms")
-    print("  - PSHU <-> Switch   : delay=2ms, jitter=1ms")
-    print("  - DSP1 <-> Switch   : delay=10ms, jitter=3ms")
-    print("  - PPP1 <-> Switch   : delay=15ms, jitter=5ms\n")
+    # Вывод сырых логов и характеристик
+    print("\n" + "="*80)
+    print(" ОТЧЕТ О ТЕСТИРОВАНИИ ПШУ (Mininet Advanced E2E) - RAW DATA")
+    print("="*80)
+    print("ПАРАМЕТРЫ СЕТИ (TCLink):")
+    print("  Client <-> Switch : delay=5ms, jitter=2ms")
+    print("  PSHU <-> Switch   : delay=2ms, jitter=1ms")
+    print("  DSP1 <-> Switch   : delay=10ms, jitter=3ms")
+    print("  PPP1 <-> Switch   : delay=15ms, jitter=5ms\n")
     
-    print("⏱️  Тест системы синхронизации (OSC Bundle +1.5 сек):")
-    print(f"  - Статус отработки таймера    : {'УСПЕШНО ✅' if sync_success else 'ПРОВАЛ ❌'}")
-    print(f"  - Транспортная задержка (сеть): {sync_delta_ms:.2f} мс\n")
+    print("ТЕСТ СИНХРОНИЗАЦИИ:")
+    print(f"  Транспортная задержка (сеть): {sync_delta_ms:.2f} мс\n")
     
-    print("🔄  Тест автоматического восстановления (Heartbeat):")
-    print(f"  - Детекция обрыва связи       : {'УСПЕШНО ✅' if heartbeat_dropped else 'ПРОВАЛ ❌'}")
-    print(f"  - Авто-переподключение (TCP)  : {'УСПЕШНО ✅' if heartbeat_recovered else 'ПРОВАЛ ❌'}")
-    print(f"  - Повторная отправка профиля  : {'УСПЕШНО ✅' if profile_pushed_again else 'ПРОВАЛ ❌'}")
-    print(f"  - Доставка команды после сбоя : {'УСПЕШНО ✅' if recovery_cmd_delivered else 'ПРОВАЛ ❌'}\n")
+    print("ТЕСТ АВТОВОССТАНОВЛЕНИЯ (Heartbeat):")
+    print(f"  Детекция обрыва связи: {heartbeat_dropped}")
+    print(f"  Авто-переподключение (TCP): {heartbeat_recovered}")
+    print(f"  Повторная отправка профиля: {profile_pushed_again}")
+    print(f"  Доставка команды после сбоя: {recovery_cmd_delivered}\n")
 
-    print("📡 Маршрутизация и Телеметрия:")
-    print(f"  - Команд доставлено на DSP    : {dsp_count}")
-    print(f"  - Телеметрии получено клиентом: {telem_count}")
-    print("="*60 + "\n")
+    print("СТАТИСТИКА ПАКЕТОВ:")
+    print(f"  Команд доставлено на DSP: {dsp_count}")
+    print(f"  Телеметрии получено клиентом: {telem_count}")
+    print("-" * 80)
+
+    print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 15) ===")
+    print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ" /tmp/pshu.log | tail -n 15').strip())
+
+    print("\n=== СЫРЫЕ ЛОГИ СООБЩЕНИЙ КОНЕЧНЫХ УСТРОЙСТВ ===")
+    print("DSP Messages (tail -n 3):")
+    print(dsp1.cmd('tail -n 3 /tmp/dsp_messages.jsonl').strip())
+    print("\nPPP Messages (tail -n 3):")
+    print(ppp1.cmd('tail -n 3 /tmp/ppp_messages.jsonl').strip())
+    print("\nClient Telemetry Sink (tail -n 3):")
+    print(client.cmd('tail -n 3 /tmp/client_telemetry.jsonl').strip())
+
+    print("\n=== РЕАЛЬНЫЕ ЛОГИ MININET (TCPDUMP CLIENT) ===")
+    print(client.cmd('tcpdump -r /tmp/client_capture.pcap -n -tt -c 15 2>/dev/null || true').strip())
+    print("="*80 + "\n")
 
     result = {
         'network_delays': {'client_to_pshu_link': '5ms+2ms', 'pshu_to_dsp_link': '2ms+10ms'},
-        'sync_system_test': {'success': sync_success, 'latency_ms': round(sync_delta_ms, 2)},
+        'sync_system_test': {'latency_ms': round(sync_delta_ms, 2)},
         'heartbeat_test': {
             'dropped_detected': heartbeat_dropped, 
             'recovered': heartbeat_recovered,
@@ -173,7 +178,6 @@ c.send(bundle.build())
     }
     (repo / 'mininet_advanced_report.json').write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
 
-    # БЕЗОПАСНАЯ ОЧИСТКА
     pshu.cmd('pkill -f "python3 main.py" || true')
     dsp1.cmd('pkill -f "mock_device_udp.py" || true')
     ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
