@@ -34,18 +34,20 @@ def run():
     net.start()
     net.pingAll()
 
-    pshu.cmd("rm -f /tmp/pshu.log /tmp/pshu.stdout")
+    pshu.cmd("rm -f /tmp/pshu.log /tmp/pshu.stdout /tmp/pshu_network.log")
     dsp1.cmd("rm -f /tmp/dsp.log /tmp/dsp_messages.jsonl")
     ppp1.cmd("rm -f /tmp/ppp.log /tmp/ppp_messages.jsonl /tmp/ppp_profile.json /tmp/ppp_recovery.log")
-    client.cmd("rm -f /tmp/telemetry_sink.log /tmp/client_telemetry.jsonl /tmp/client_capture.pcap /tmp/ntp_server.log")
+    client.cmd("rm -f /tmp/telemetry_sink.log /tmp/client_telemetry.jsonl /tmp/ntp_server.log")
 
     print("[2/6] Запуск эмуляторов устройств, телеметрии и ЛОКАЛЬНОГО NTP СЕРВЕРА...")
     dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl > /tmp/dsp.log 2>&1 &')
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_ppp_tcp_device.py --port 9001 --out /tmp/ppp_messages.jsonl --profile-out /tmp/ppp_profile.json > /tmp/ppp.log 2>&1 &')
     client.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/client_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
-    client.cmd("tcpdump -i any -n -tt -w /tmp/client_capture.pcap udp port 8000 or udp port 9100 or udp port 9200 > /dev/null 2>&1 &")
+    
+    # Прямой текстовый захват пакетов на интерфейсе ПШУ (-l отключает буферизацию)
+    # Слушаем OSC (8000), DSP (9000), PPP (9001) и Телеметрию (9100)
+    pshu.cmd("tcpdump -l -i pshu-eth0 -n -tt 'udp port 8000 or udp port 9000 or tcp port 9001 or udp port 9100' > /tmp/pshu_network.log 2>&1 &")
 
-    # Изолированный NTP сервер (с flush=True для мгновенной записи логов)
     fake_ntp_code = """
 import socket
 import struct
@@ -116,7 +118,6 @@ from pythonosc.osc_message_builder import OscMessageBuilder
 target_time = time.time() + 1.5
 msg = OscMessageBuilder(address='/dsp1/sync_test')
 msg.add_arg('delayed_execution')
-# ИСПРАВЛЕНИЕ: Передаем время как строку, чтобы 32-битный Float OSC не обрезал 42 секунды!
 msg.add_arg(str(target_time)) 
 
 bundle = OscBundleBuilder(target_time)
@@ -153,7 +154,6 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
         if 'sync_test' in line:
             rec = json.loads(line)
             payload = json.loads(rec['payload'])
-            # ИСПРАВЛЕНИЕ: Распаковываем строку обратно во float (высокая точность)
             target_ts = float(payload['args'][1]) 
             actual_receive_ts = rec['ts']
             sync_delta_ms = (actual_receive_ts - target_ts) * 1000
@@ -166,8 +166,6 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
     heartbeat_recovered = 'СВЯЗЬ ВОССТАНОВЛЕНА' in pshu_log
     profile_pushed_again = _to_int_safe(ppp1.cmd("cat /tmp/ppp_profile.json 2>/dev/null | wc -l")) > 0
     recovery_cmd_delivered = 'after_recovery' in ppp_messages
-    
-    # NTP работал штатно, но в логах это выводилось без слова "успешна", проверим по активности сервера
     ntp_synced = 'Sent NTP response' in client.cmd('cat /tmp/ntp_server.log 2>/dev/null || true')
 
     print("\n" + "="*80)
@@ -194,19 +192,14 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
     print(f"  Телеметрии получено клиентом: {telem_count}")
     print("-" * 80)
 
-    print("\n=== ЛОГИ ЛОКАЛЬНОГО NTP СЕРВЕРА ===")
-    print(client.cmd('cat /tmp/ntp_server.log | tail -n 5').strip())
+    print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 15) ===")
+    print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ|NTP" /tmp/pshu.log | tail -n 15').strip())
 
-    print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 20) ===")
-    print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ|NTP" /tmp/pshu.log | tail -n 20').strip())
-
-    print("\n=== СЫРЫЕ ЛОГИ СООБЩЕНИЙ КОНЕЧНЫХ УСТРОЙСТВ ===")
-    print("DSP Messages (tail -n 3):")
-    print(dsp1.cmd('tail -n 3 /tmp/dsp_messages.jsonl').strip())
-    print("\nPPP Messages (tail -n 3):")
-    print(ppp1.cmd('tail -n 3 /tmp/ppp_messages.jsonl').strip())
-    print("\nClient Telemetry Sink (tail -n 3):")  # <- ВЕРНУЛ ТЕЛЕМЕТРИЮ!
-    print(client.cmd('tail -n 3 /tmp/client_telemetry.jsonl').strip())
+    print("\n=== РЕАЛЬНЫЕ СЕТЕВЫЕ ДАМПЫ (ТРАНСПОРТНЫЙ УРОВЕНЬ ПШУ) ===")
+    print("--- Пакеты Синхронизации (OSC Bundle -> DSP UDP) ---")
+    print(pshu.cmd('grep -m 10 "10.0.0.1.8000 > 10.0.0.2.8000\\|10.0.0.2.* > 10.0.0.3.9000" /tmp/pshu_network.log || true').strip())
+    print("\n--- Пакеты Автовосстановления и Профиля (TCP Handshake -> PPP) ---")
+    print(pshu.cmd('grep "10.0.0.4.9001" /tmp/pshu_network.log | tail -n 10').strip())
 
     print("="*80 + "\n")
 
@@ -216,7 +209,7 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
     ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
     dsp1.cmd('pkill -f "telemetry_gen.py" || true')
     client.cmd('pkill -f "telemetry_sink.py" || true')
-    client.cmd('pkill -f tcpdump || true')
+    pshu.cmd('pkill -f tcpdump || true')
     net.stop()
 
 if __name__ == '__main__':
