@@ -53,7 +53,7 @@ def run():
         "listen_port": 8000,
         "log_level": "DEBUG",
         "log_file": "/tmp/pshu.log",
-        "ntp": {"enabled": False},
+        "ntp": {"enabled": True},
         "routes": [
             {"prefix": "/dsp1", "route_type": "local", "driver": {"name": "dsp1", "host": "10.0.0.3", "port": 9000, "protocol": "udp", "output_mode": "mapped_json"}},
             {"prefix": "/ppp1", "route_type": "ppp", "driver": {"name": "ppp1", "host": "10.0.0.4", "port": 9001, "protocol": "tcp", "output_mode": "osc_native", "ppp_profile": {"signing_key": "secret", "rules": {"mode": "test"}}}}
