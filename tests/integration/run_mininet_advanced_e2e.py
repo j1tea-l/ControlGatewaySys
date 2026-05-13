@@ -37,15 +37,38 @@ def run():
     pshu.cmd("rm -f /tmp/pshu.log /tmp/pshu.stdout")
     dsp1.cmd("rm -f /tmp/dsp.log /tmp/dsp_messages.jsonl")
     ppp1.cmd("rm -f /tmp/ppp.log /tmp/ppp_messages.jsonl /tmp/ppp_profile.json /tmp/ppp_recovery.log")
-    client.cmd("rm -f /tmp/telemetry_sink.log /tmp/client_telemetry.jsonl /tmp/client_capture.pcap")
+    client.cmd("rm -f /tmp/telemetry_sink.log /tmp/client_telemetry.jsonl /tmp/client_capture.pcap /tmp/ntp_server.log")
 
-    print("[2/6] Запуск эмуляторов устройств и захвата трафика...")
+    print("[2/6] Запуск эмуляторов устройств, телеметрии и ЛОКАЛЬНОГО NTP СЕРВЕРА...")
     dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl > /tmp/dsp.log 2>&1 &')
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_ppp_tcp_device.py --port 9001 --out /tmp/ppp_messages.jsonl --profile-out /tmp/ppp_profile.json > /tmp/ppp.log 2>&1 &')
     client.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/client_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
-    
-    # Запуск tcpdump для записи сырого сетевого взаимодействия
     client.cmd("tcpdump -i any -n -tt -w /tmp/client_capture.pcap udp port 8000 or udp port 9100 or udp port 9200 > /dev/null 2>&1 &")
+
+    # Встроенный фейковый NTP-сервер на хосте client (10.0.0.1)
+    ntp_server_script = """
+import socket
+import struct
+import time
+NTP_EPOCH_OFFSET = 2208988800
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(('0.0.0.0', 123))
+while True:
+    try:
+        data, addr = sock.recvfrom(1024)
+        if len(data) >= 48:
+            now = time.time()
+            ntp_time = now + NTP_EPOCH_OFFSET
+            sec = int(ntp_time)
+            frac = int((ntp_time - sec) * (2**32))
+            resp = bytearray(48)
+            resp[0] = 0x24  # Leap indicator 0, Version 4, Mode 4 (Server)
+            struct.pack_into("!II", resp, 40, sec, frac)
+            sock.sendto(resp, addr)
+    except Exception:
+        pass
+"""
+    client.cmd(f"python3 -c \"{ntp_server_script.strip()}\" > /tmp/ntp_server.log 2>&1 &")
 
     print("[3/6] Запуск подсистемы шлюза управления (ПШУ)...")
     cfg = {
@@ -53,7 +76,14 @@ def run():
         "listen_port": 8000,
         "log_level": "DEBUG",
         "log_file": "/tmp/pshu.log",
-        "ntp": {"enabled": True},
+        "ntp": {
+            "enabled": True,
+            "server": "10.0.0.1",
+            "port": 123,
+            "poll_interval_sec": 2.0,
+            "timeout_sec": 1.0,
+            "alpha": 0.5
+        },
         "routes": [
             {"prefix": "/dsp1", "route_type": "local", "driver": {"name": "dsp1", "host": "10.0.0.3", "port": 9000, "protocol": "udp", "output_mode": "mapped_json"}},
             {"prefix": "/ppp1", "route_type": "ppp", "driver": {"name": "ppp1", "host": "10.0.0.4", "port": 9001, "protocol": "tcp", "output_mode": "osc_native", "ppp_profile": {"signing_key": "secret", "rules": {"mode": "test"}}}}
@@ -65,7 +95,9 @@ def run():
     }
     (repo / 'config.e2e.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
     pshu.cmd(f'cd {repo} && cp config.e2e.json config.example.json && python3 main.py > /tmp/pshu.stdout 2>&1 &')
-    time.sleep(2.0)
+    
+    # Даем ПШУ время на запуск и синхронизацию с локальным NTP
+    time.sleep(4.0)
 
     print("[4/6] Тест №1 и №2: Синхронизация (OSC Bundle) и Телеметрия...")
     sync_test_script = """
@@ -86,7 +118,7 @@ bundle.add_content(msg.build())
 c.send(bundle.build())
 """
     client.cmd(f"python3 -c \"{sync_test_script}\" > /tmp/sync_test.log")
-    time.sleep(2.5) 
+    time.sleep(3.0) 
 
     client.cmd(f'cd {repo} && python3 scripts/osc_loadgen.py --host 10.0.0.2 --port 8000 --count 10 --mode message --address /ppp1/volume')
     dsp1.cmd(f'cd {repo} && python3 scripts/telemetry_gen.py --host 10.0.0.2 --port 9100 --device dsp1 --count 10 --interval 0.05 > /dev/null 2>&1 &')
@@ -125,8 +157,8 @@ c.send(bundle.build())
     heartbeat_recovered = 'СВЯЗЬ ВОССТАНОВЛЕНА' in pshu_log
     profile_pushed_again = _to_int_safe(ppp1.cmd("cat /tmp/ppp_profile.json 2>/dev/null | wc -l")) > 0
     recovery_cmd_delivered = 'after_recovery' in ppp_messages
+    ntp_synced = 'NTP Синхронизация успешна' in pshu_log
 
-    # Вывод сырых логов и характеристик
     print("\n" + "="*80)
     print(" ОТЧЕТ О ТЕСТИРОВАНИИ ПШУ (Mininet Advanced E2E) - RAW DATA")
     print("="*80)
@@ -137,6 +169,7 @@ c.send(bundle.build())
     print("  PPP1 <-> Switch   : delay=15ms, jitter=5ms\n")
     
     print("ТЕСТ СИНХРОНИЗАЦИИ:")
+    print(f"  NTP Синхронизация с 10.0.0.1: {ntp_synced}")
     print(f"  Транспортная задержка (сеть): {sync_delta_ms:.2f} мс\n")
     
     print("ТЕСТ АВТОВОССТАНОВЛЕНИЯ (Heartbeat):")
@@ -150,8 +183,8 @@ c.send(bundle.build())
     print(f"  Телеметрии получено клиентом: {telem_count}")
     print("-" * 80)
 
-    print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 15) ===")
-    print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ" /tmp/pshu.log | tail -n 15').strip())
+    print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 20) ===")
+    print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ|NTP" /tmp/pshu.log | tail -n 20').strip())
 
     print("\n=== СЫРЫЕ ЛОГИ СООБЩЕНИЙ КОНЕЧНЫХ УСТРОЙСТВ ===")
     print("DSP Messages (tail -n 3):")
@@ -167,7 +200,7 @@ c.send(bundle.build())
 
     result = {
         'network_delays': {'client_to_pshu_link': '5ms+2ms', 'pshu_to_dsp_link': '2ms+10ms'},
-        'sync_system_test': {'latency_ms': round(sync_delta_ms, 2)},
+        'sync_system_test': {'ntp_synced': ntp_synced, 'latency_ms': round(sync_delta_ms, 2)},
         'heartbeat_test': {
             'dropped_detected': heartbeat_dropped, 
             'recovered': heartbeat_recovered,
@@ -179,6 +212,7 @@ c.send(bundle.build())
     (repo / 'mininet_advanced_report.json').write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding='utf-8')
 
     pshu.cmd('pkill -f "python3 main.py" || true')
+    client.cmd('pkill -f "ntp_server" || true')
     dsp1.cmd('pkill -f "mock_device_udp.py" || true')
     ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
     dsp1.cmd('pkill -f "telemetry_gen.py" || true')
