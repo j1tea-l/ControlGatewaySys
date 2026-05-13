@@ -45,7 +45,7 @@ def run():
     client.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/client_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
     client.cmd("tcpdump -i any -n -tt -w /tmp/client_capture.pcap udp port 8000 or udp port 9100 or udp port 9200 > /dev/null 2>&1 &")
 
-    # Изолированный NTP сервер без конфликтов с chronyd (порт 12345)
+    # Изолированный NTP сервер без bash-конфликтов
     fake_ntp_code = """
 import socket
 import struct
@@ -55,6 +55,7 @@ NTP_EPOCH_OFFSET = 2208988800
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.bind(('0.0.0.0', 12345))
+print("Fake NTP Server listening on port 12345")
 
 while True:
     try:
@@ -67,11 +68,12 @@ while True:
             
             resp = bytearray(48)
             resp[0] = 0x24
-            struct.pack_into("!II", resp, 40, sec, frac)
+            struct.pack_into(">II", resp, 40, sec, frac) # >II вместо !II
             
             sock.sendto(resp, addr)
-    except Exception:
-        pass
+            print(f"Sent NTP response to {addr}")
+    except Exception as e:
+        print(f"Error: {e}")
 """
     (repo / 'fake_ntp.py').write_text(fake_ntp_code, encoding='utf-8')
     client.cmd(f'python3 {repo}/fake_ntp.py > /tmp/ntp_server.log 2>&1 &')
@@ -85,7 +87,7 @@ while True:
         "ntp": {
             "enabled": True,
             "server": "10.0.0.1",
-            "port": 12345, # Используем безопасный порт
+            "port": 12345,
             "poll_interval_sec": 2.0,
             "timeout_sec": 1.0,
             "alpha": 0.5
@@ -102,25 +104,26 @@ while True:
     (repo / 'config.e2e.json').write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
     pshu.cmd(f'cd {repo} && cp config.e2e.json config.example.json && python3 main.py > /tmp/pshu.stdout 2>&1 &')
     
-    time.sleep(4.0)
+    time.sleep(5.0) # Даем больше времени на стабильную NTP синхронизацию
 
     print("[4/6] Тест №1 и №2: Синхронизация (OSC Bundle) и Телеметрия...")
     sync_test_script = """
 import time
-from pythonosc.udp_client import SimpleUDPClient
+import socket
 from pythonosc.osc_bundle_builder import OscBundleBuilder
 from pythonosc.osc_message_builder import OscMessageBuilder
 
-c = SimpleUDPClient('10.0.0.2', 8000)
 target_time = time.time() + 1.5
-
 msg = OscMessageBuilder(address='/dsp1/sync_test')
 msg.add_arg('delayed_execution')
 msg.add_arg(target_time)
 
 bundle = OscBundleBuilder(target_time)
 bundle.add_content(msg.build())
-c.send(bundle.build())
+
+# Прямая отправка байтов через сокет гарантирует отсутствие конфликтов библиотек
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
 """
     client.cmd(f"python3 -c \"{sync_test_script}\" > /tmp/sync_test.log")
     time.sleep(3.0) 
@@ -188,6 +191,9 @@ c.send(bundle.build())
     print(f"  Телеметрии получено клиентом: {telem_count}")
     print("-" * 80)
 
+    print("\n=== ЛОГИ ЛОКАЛЬНОГО NTP СЕРВЕРА ===")
+    print(client.cmd('cat /tmp/ntp_server.log | tail -n 5').strip())
+
     print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 20) ===")
     print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ|NTP" /tmp/pshu.log | tail -n 20').strip())
 
@@ -196,11 +202,7 @@ c.send(bundle.build())
     print(dsp1.cmd('tail -n 3 /tmp/dsp_messages.jsonl').strip())
     print("\nPPP Messages (tail -n 3):")
     print(ppp1.cmd('tail -n 3 /tmp/ppp_messages.jsonl').strip())
-    print("\nClient Telemetry Sink (tail -n 3):")
-    print(client.cmd('tail -n 3 /tmp/client_telemetry.jsonl').strip())
 
-    print("\n=== РЕАЛЬНЫЕ ЛОГИ MININET (TCPDUMP CLIENT) ===")
-    print(client.cmd('tcpdump -r /tmp/client_capture.pcap -n -tt -c 15 2>/dev/null || true').strip())
     print("="*80 + "\n")
 
     pshu.cmd('pkill -f "python3 main.py" || true')
