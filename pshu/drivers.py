@@ -69,27 +69,17 @@ class TCPCommandClient:
         self._lock = asyncio.Lock()
 
     async def _connect(self) -> None:
+        """Однократная попытка установить соединение."""
         if self._writer is not None and not self._writer.is_closing():
             return
-
-        last_exc: Optional[Exception] = None
-        for attempt in range(self.policy.retries + 1):
-            try:
-                self._reader, self._writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port), 
-                    timeout=self.policy.timeout_sec
-                )
-                return
-            except Exception as exc:
-                last_exc = exc
-                if attempt < self.policy.retries:
-                    await asyncio.sleep(self.policy.retry_backoff_sec * (attempt + 1))
-        
-        self._reader = None
-        self._writer = None
-        raise ConnectionError(f"TCP connect failed: {last_exc}")
+            
+        self._reader, self._writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port), 
+            timeout=self.policy.timeout_sec
+        )
 
     async def _disconnect(self) -> None:
+        """Форсированное закрытие сокета при ошибках I/O."""
         if self._writer:
             try:
                 self._writer.close()
@@ -107,15 +97,24 @@ class TCPCommandClient:
         await self._send(header + payload)
 
     async def _send(self, payload: bytes) -> None:
+        """Потокобезопасная отправка данных с авто-восстановлением сессии."""
         async with self._lock:
-            await self._connect()
+            last_exc = None
+            for attempt in range(self.policy.retries + 1):
+                try:
+                    await self._connect()
+                    self._writer.write(payload)
+                    await asyncio.wait_for(self._writer.drain(), timeout=self.policy.timeout_sec)
+                    return  # Успешная отправка, выходим из цикла
+                except Exception as exc:
+                    last_exc = exc
+                    # При обрыве сбрасываем "протухший" дескриптор сокета
+                    await self._disconnect()
+                    if attempt < self.policy.retries:
+                        await asyncio.sleep(self.policy.retry_backoff_sec * (attempt + 1))
             
-            try:
-                self._writer.write(payload)
-                await asyncio.wait_for(self._writer.drain(), timeout=self.policy.timeout_sec)
-            except Exception as exc:
-                await self._disconnect()
-                raise ConnectionError(f"TCP write failed (Broken Pipe/Timeout): {exc}") from exc
+            # Если все попытки исчерпаны
+            raise ConnectionError(f"TCP write failed after {self.policy.retries} retries: {last_exc}") from last_exc
 
 
 def _strip_prefix(address: str, prefix: str) -> str:
