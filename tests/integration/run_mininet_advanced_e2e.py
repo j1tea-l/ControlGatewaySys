@@ -195,4 +195,50 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
     ntp_synced = 'Sent NTP response' in client.cmd('cat /tmp/ntp_server.log 2>/dev/null || true')
 
     print("\n" + "="*80)
-    print(" ОТЧЕТ О ТЕ
+    print(" ОТЧЕТ О ТЕСТИРОВАНИИ ПШУ (Mininet Advanced E2E) - RAW DATA")
+    print("="*80)
+    print("ПАРАМЕТРЫ СЕТИ (TCLink):")
+    print("  Client <-> Switch : delay=5ms, jitter=2ms")
+    print("  PSHU <-> Switch   : delay=2ms, jitter=1ms")
+    print("  DSP1 <-> Switch   : delay=10ms, jitter=3ms")
+    print("  PPP1 <-> Switch   : delay=15ms, jitter=5ms\n")
+    
+    # ИСПРАВЛЕНО: Вывод обновленных метрик
+    print("ТЕСТ СИНХРОНИЗАЦИИ:")
+    print(f"  NTP Синхронизация с 10.0.0.1: {ntp_synced}")
+    print(f"  Сквозная задержка (target -> receive): {sync_delta_ms:.2f} мс")
+    print(f"  Внутренний джиттер планировщика ПШУ: {pure_jitter_ms:.2f} мс (чистая погрешность ПО)\n")
+    
+    print("ТЕСТ АВТОВОССТАНОВЛЕНИЯ (Heartbeat):")
+    print(f"  Детекция обрыва связи: {heartbeat_dropped}")
+    print(f"  Авто-переподключение (TCP): {heartbeat_recovered}")
+    print(f"  Повторная отправка профиля: {profile_pushed_again}")
+    print(f"  Доставка команды после сбоя: {recovery_cmd_delivered}\n")
+
+    print("СТАТИСТИКА ПАКЕТОВ:")
+    print(f"  Команд доставлено на DSP: {dsp_count}")
+    print(f"  Телеметрии получено клиентом: {telem_count}")
+    print("-" * 80)
+
+    print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 15) ===")
+    print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ|NTP" /tmp/pshu.log | tail -n 15').strip())
+
+    print("\n=== РЕАЛЬНЫЕ СЕТЕВЫЕ ДАМПЫ (ТРАНСПОРТНЫЙ УРОВЕНЬ ПШУ) ===")
+    print("--- Пакеты Синхронизации (OSC Bundle -> DSP UDP) ---")
+    print(pshu.cmd('grep -m 10 "10.0.0.1.8000 > 10.0.0.2.8000\\|10.0.0.2.* > 10.0.0.3.9000" /tmp/pshu_network.log || true').strip())
+    print("\n--- Пакеты Автовосстановления и Профиля (TCP Handshake -> PPP) ---")
+    print(pshu.cmd('grep "10.0.0.4.9001" /tmp/pshu_network.log | tail -n 10').strip())
+
+    print("="*80 + "\n")
+
+    pshu.cmd('pkill -f "python3 main.py" || true')
+    client.cmd('pkill -f "fake_ntp.py" || true')
+    dsp1.cmd('pkill -f "mock_device_udp.py" || true')
+    ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
+    dsp1.cmd('pkill -f "telemetry_gen.py" || true')
+    client.cmd('pkill -f "telemetry_sink.py" || true')
+    pshu.cmd('pkill -f tcpdump || true')
+    net.stop()
+
+if __name__ == '__main__':
+    run()
