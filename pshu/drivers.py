@@ -116,7 +116,6 @@ class TCPCommandClient:
             # Если все попытки исчерпаны
             raise ConnectionError(f"TCP write failed after {self.policy.retries} retries: {last_exc}") from last_exc
 
-
 def _strip_prefix(address: str, prefix: str) -> str:
     if address == prefix:
         return "/"
