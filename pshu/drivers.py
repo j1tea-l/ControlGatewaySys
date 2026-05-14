@@ -224,7 +224,12 @@ class PPPDriver(EthernetDeviceDriver):
         await self.tcp_client.send_line(envelope)
         logger.info("PPP PROFILE PUSHED driver=%s bytes=%s", self.name, len(envelope))
         self._profile_sent = True
-        await self.tcp_client._disconnect()
+        
+        # ФИНАЛЬНЫЙ ФИКС: Вместо разрыва соединения (_disconnect), мы делаем 
+        # асинхронную микро-паузу. Это спасает парсер принимающей стороны 
+        # от "склейки" TCP-потока, сохраняет Keep-Alive сессию и не 
+        # провоцирует Heartbeat на ложные срабатывания.
+        await asyncio.sleep(0.05)
 
     async def send_command(self, address: str, args: list) -> None:
         await self._push_profile_once()
