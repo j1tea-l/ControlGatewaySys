@@ -212,8 +212,6 @@ class PPPDriver(EthernetDeviceDriver):
     async def _on_reconnect(self) -> None:
         logger.info("Сброс профиля и очистка TCP-сокета для ППП '%s'.", self.name)
         self._profile_sent = False
-        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Гарантированно убиваем старый сокет при реконнекте, 
-        # чтобы _send в TCPCommandClient начал новую сессию с флага SYN.
         await self.tcp_client._disconnect()
 
     async def _push_profile_once(self) -> None:
@@ -222,9 +220,11 @@ class PPPDriver(EthernetDeviceDriver):
         profile = json.dumps(self.ppp_profile.get("rules", {}), ensure_ascii=False).encode("utf-8")
         signature = hashlib.sha256(profile + self.ppp_profile.get("signing_key", "").encode("utf-8")).hexdigest()
         envelope = json.dumps({"type": "ppp_driver_profile", "signature": signature, "payload": profile.decode("utf-8")}, ensure_ascii=False).encode("utf-8")
+        
         await self.tcp_client.send_line(envelope)
         logger.info("PPP PROFILE PUSHED driver=%s bytes=%s", self.name, len(envelope))
         self._profile_sent = True
+        await self.tcp_client._disconnect()
 
     async def send_command(self, address: str, args: list) -> None:
         await self._push_profile_once()
