@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Optional, Any, TYPE_CHECKING
 
 from pythonosc.osc_message_builder import OscMessageBuilder
-
 from pshu.metrics import MetricsCollector
 
 # Импортируем HeartbeatManager для аннотаций типов, избегая циклических импортов
@@ -19,18 +18,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("PSHU_Drivers")
 
-
 class BaseDriver:
     async def send_command(self, address: str, args: list) -> None:
         raise NotImplementedError
-
 
 @dataclass
 class RetryPolicy:
     timeout_sec: float = 1.0
     retries: int = 3
     retry_backoff_sec: float = 0.2
-
 
 class UDPCommandClient:
     def __init__(self, host: str, port: int, policy: RetryPolicy):
@@ -58,7 +54,6 @@ class UDPCommandClient:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.sendto(payload, (self.host, self.port))
 
-
 class TCPCommandClient:
     def __init__(self, host: str, port: int, policy: RetryPolicy):
         self.host = host
@@ -69,17 +64,17 @@ class TCPCommandClient:
         self._lock = asyncio.Lock()
 
     async def _connect(self) -> None:
-        """Однократная попытка установить соединение."""
+        """Устанавливает TCP-соединение, если оно еще не открыто."""
         if self._writer is not None and not self._writer.is_closing():
             return
-            
+
         self._reader, self._writer = await asyncio.wait_for(
             asyncio.open_connection(self.host, self.port), 
             timeout=self.policy.timeout_sec
         )
 
     async def _disconnect(self) -> None:
-        """Форсированное закрытие сокета при ошибках I/O."""
+        """Форсированное закрытие сокета при ошибках I/O или явной инвалидации."""
         if self._writer:
             try:
                 self._writer.close()
@@ -105,7 +100,7 @@ class TCPCommandClient:
                     await self._connect()
                     self._writer.write(payload)
                     await asyncio.wait_for(self._writer.drain(), timeout=self.policy.timeout_sec)
-                    return  # Успешная отправка, выходим из цикла
+                    return
                 except Exception as exc:
                     last_exc = exc
                     # При обрыве сбрасываем "протухший" дескриптор сокета
@@ -113,7 +108,6 @@ class TCPCommandClient:
                     if attempt < self.policy.retries:
                         await asyncio.sleep(self.policy.retry_backoff_sec * (attempt + 1))
             
-            # Если все попытки исчерпаны
             raise ConnectionError(f"TCP write failed after {self.policy.retries} retries: {last_exc}") from last_exc
 
 def _strip_prefix(address: str, prefix: str) -> str:
@@ -123,7 +117,6 @@ def _strip_prefix(address: str, prefix: str) -> str:
         suffix = address[len(prefix):]
         return suffix if suffix.startswith("/") else "/" + suffix
     return address
-
 
 class EthernetDeviceDriver(BaseDriver):
     def __init__(
@@ -175,11 +168,11 @@ class EthernetDeviceDriver(BaseDriver):
         return payload
 
     async def send_command(self, address: str, args: list) -> None:
-        # ИСПРАВЛЕНИЕ: Fast-Fail теперь применяется ТОЛЬКО для TCP устройств.
-        # Для UDP (fire-and-forget) мы всегда отправляем пакет.
         if self.protocol == "tcp" and self.dev_state and not self.dev_state.is_online:
             self.metrics.failed += 1
             logger.warning("TX ABORT driver=%s address=%s: узел в статусе OFFLINE", self.name, address)
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Инвалидируем сокет при обнаруженном оффлайне
+            await self.tcp_client._disconnect()
             raise ConnectionError(f"Узел {self.name} недоступен (OFFLINE)")
 
         started = time.time()
@@ -199,7 +192,6 @@ class EthernetDeviceDriver(BaseDriver):
             self.metrics.record_latency(started)
             logger.info("TX OK driver=%s address=%s latency_ms=%.3f", self.name, address, self.metrics.latency_ms[-1])
             
-            # Подтверждаем активность узла при успешной отправке (даже если он был OFFLINE по UDP)
             if self.dev_state:
                 self.dev_state.mark_seen()
                 
@@ -207,7 +199,6 @@ class EthernetDeviceDriver(BaseDriver):
             self.metrics.failed += 1
             logger.error("TX FAIL driver=%s address=%s err=%s", self.name, address, exc)
             raise
-
 
 class PPPDriver(EthernetDeviceDriver):
     def __init__(self, *args, ppp_profile: Optional[dict[str, Any]] = None, **kwargs):
@@ -221,6 +212,8 @@ class PPPDriver(EthernetDeviceDriver):
     async def _on_reconnect(self) -> None:
         logger.info("Сброс профиля и очистка TCP-сокета для ППП '%s'.", self.name)
         self._profile_sent = False
+        # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Гарантированно убиваем старый сокет при реконнекте, 
+        # чтобы _send в TCPCommandClient начал новую сессию с флага SYN.
         await self.tcp_client._disconnect()
 
     async def _push_profile_once(self) -> None:
