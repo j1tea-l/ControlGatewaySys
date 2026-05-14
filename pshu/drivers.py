@@ -219,8 +219,9 @@ class PPPDriver(EthernetDeviceDriver):
             self.dev_state.on_reconnect = self._on_reconnect
 
     async def _on_reconnect(self) -> None:
-        logger.info("Сброс профиля для ППП '%s'. Будет отправлен заново при следующей команде.", self.name)
+        logger.info("Сброс профиля и очистка TCP-сокета для ППП '%s'.", self.name)
         self._profile_sent = False
+        await self.tcp_client._disconnect()
 
     async def _push_profile_once(self) -> None:
         if self._profile_sent:
