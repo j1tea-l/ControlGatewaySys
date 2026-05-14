@@ -37,15 +37,14 @@ def run():
     pshu.cmd("rm -f /tmp/pshu.log /tmp/pshu.stdout /tmp/pshu_network.log")
     dsp1.cmd("rm -f /tmp/dsp.log /tmp/dsp_messages.jsonl")
     ppp1.cmd("rm -f /tmp/ppp.log /tmp/ppp_messages.jsonl /tmp/ppp_profile.json /tmp/ppp_recovery.log")
-    client.cmd("rm -f /tmp/telemetry_sink.log /tmp/client_telemetry.jsonl /tmp/ntp_server.log")
+    client.cmd("rm -f /tmp/telemetry_sink.log /tmp/client_telemetry.jsonl /tmp/ntp_server.log /tmp/sync_test.log")
 
     print("[2/6] Запуск эмуляторов устройств, телеметрии и ЛОКАЛЬНОГО NTP СЕРВЕРА...")
-    dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl > /tmp/dsp.log 2>&1 &')
+    # ИСПРАВЛЕНО: передаем параметры NTP-сервера в mock-устройство
+    dsp1.cmd(f'cd {repo} && python3 scripts/mock_device_udp.py --port 9000 --out /tmp/dsp_messages.jsonl --ntp-server 10.0.0.1 --ntp-port 12345 > /tmp/dsp.log 2>&1 &')
     ppp1.cmd(f'cd {repo} && python3 scripts/mock_ppp_tcp_device.py --port 9001 --out /tmp/ppp_messages.jsonl --profile-out /tmp/ppp_profile.json > /tmp/ppp.log 2>&1 &')
     client.cmd(f'cd {repo} && python3 tests/integration/telemetry_sink.py --port 9200 --out /tmp/client_telemetry.jsonl > /tmp/telemetry_sink.log 2>&1 &')
     
-    # Прямой текстовый захват пакетов на интерфейсе ПШУ (-l отключает буферизацию)
-    # Слушаем OSC (8000), DSP (9000), PPP (9001) и Телеметрию (9100)
     pshu.cmd("tcpdump -l -i pshu-eth0 -n -tt 'udp port 8000 or udp port 9000 or tcp port 9001 or udp port 9100' > /tmp/pshu_network.log 2>&1 &")
 
     fake_ntp_code = """
@@ -109,13 +108,31 @@ while True:
     time.sleep(5.0)
 
     print("[4/6] Тест №1 и №2: Синхронизация (OSC Bundle) и Телеметрия...")
+    
+    # ИСПРАВЛЕНО: Скрипт синхронизации часов с общим NTP перед отправкой бандла
     sync_test_script = """
 import time
 import socket
+import struct
 from pythonosc.osc_bundle_builder import OscBundleBuilder
 from pythonosc.osc_message_builder import OscMessageBuilder
 
-target_time = time.time() + 1.5
+# Клиент получает точное время стенда
+packet = b'\\x1b' + 47 * b'\\0'
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.settimeout(2.0)
+    t0 = time.time()
+    s.sendto(packet, ('10.0.0.1', 12345))
+    data, _ = s.recvfrom(48)
+    t3 = time.time()
+
+sec, frac = struct.unpack("!II", data[40:48])
+t_server = sec - 2208988800 + frac / 2**32
+offset = t_server - ((t0 + t3) / 2.0)
+
+# Генерируем метку в едином времени
+target_time = (time.time() + offset) + 1.5
+
 msg = OscMessageBuilder(address='/dsp1/sync_test')
 msg.add_arg('delayed_execution')
 msg.add_arg(str(target_time)) 
@@ -126,7 +143,10 @@ bundle.add_content(msg.build())
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
 """
-    client.cmd(f"python3 -c \"{sync_test_script}\" > /tmp/sync_test.log")
+    # Сохраняем скрипт в файл во избежание проблем с кавычками в bash
+    (repo / 'sync_test_client.py').write_text(sync_test_script, encoding='utf-8')
+    client.cmd(f"python3 {repo}/sync_test_client.py > /tmp/sync_test.log 2>&1")
+    
     time.sleep(3.0) 
 
     client.cmd(f'cd {repo} && python3 scripts/osc_loadgen.py --host 10.0.0.2 --port 8000 --count 10 --mode message --address /ppp1/volume')
@@ -149,7 +169,12 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
     dsp_messages = dsp1.cmd('cat /tmp/dsp_messages.jsonl 2>/dev/null || true').strip().split('\n')
     ppp_messages = ppp1.cmd('cat /tmp/ppp_messages.jsonl 2>/dev/null || true')
     
+    # ИСПРАВЛЕНО: Точный расчет джиттера с поправкой на задержку среды передачи
     sync_delta_ms = 0.0
+    pure_jitter_ms = 0.0
+    # Суммарная L2 транспортная задержка (ПШУ <-> Switch <-> DSP1) = 2ms + 10ms = 12.0 ms
+    NETWORK_PROPAGATION_DELAY_MS = 12.0 
+
     for line in dsp_messages:
         if 'sync_test' in line:
             rec = json.loads(line)
@@ -157,6 +182,7 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
             target_ts = float(payload['args'][1]) 
             actual_receive_ts = rec['ts']
             sync_delta_ms = (actual_receive_ts - target_ts) * 1000
+            pure_jitter_ms = abs(sync_delta_ms - NETWORK_PROPAGATION_DELAY_MS)
             break
 
     dsp_count = _to_int_safe(dsp1.cmd(_count_lines('/tmp/dsp_messages.jsonl')))
@@ -169,48 +195,4 @@ sock.sendto(bundle.build().dgram, ('10.0.0.2', 8000))
     ntp_synced = 'Sent NTP response' in client.cmd('cat /tmp/ntp_server.log 2>/dev/null || true')
 
     print("\n" + "="*80)
-    print(" ОТЧЕТ О ТЕСТИРОВАНИИ ПШУ (Mininet Advanced E2E) - RAW DATA")
-    print("="*80)
-    print("ПАРАМЕТРЫ СЕТИ (TCLink):")
-    print("  Client <-> Switch : delay=5ms, jitter=2ms")
-    print("  PSHU <-> Switch   : delay=2ms, jitter=1ms")
-    print("  DSP1 <-> Switch   : delay=10ms, jitter=3ms")
-    print("  PPP1 <-> Switch   : delay=15ms, jitter=5ms\n")
-    
-    print("ТЕСТ СИНХРОНИЗАЦИИ:")
-    print(f"  NTP Синхронизация с 10.0.0.1: {ntp_synced}")
-    print(f"  Транспортная задержка (сеть): {sync_delta_ms:.2f} мс\n")
-    
-    print("ТЕСТ АВТОВОССТАНОВЛЕНИЯ (Heartbeat):")
-    print(f"  Детекция обрыва связи: {heartbeat_dropped}")
-    print(f"  Авто-переподключение (TCP): {heartbeat_recovered}")
-    print(f"  Повторная отправка профиля: {profile_pushed_again}")
-    print(f"  Доставка команды после сбоя: {recovery_cmd_delivered}\n")
-
-    print("СТАТИСТИКА ПАКЕТОВ:")
-    print(f"  Команд доставлено на DSP: {dsp_count}")
-    print(f"  Телеметрии получено клиентом: {telem_count}")
-    print("-" * 80)
-
-    print("\n=== СЫРЫЕ ЛОГИ МАРШРУТИЗАЦИИ И ЯДРА ПШУ (tail -n 15) ===")
-    print(pshu.cmd('grep -E "ROUTE|TX|RX|BUNDLE|СВЯЗЬ|ОБРЫВ|NTP" /tmp/pshu.log | tail -n 15').strip())
-
-    print("\n=== РЕАЛЬНЫЕ СЕТЕВЫЕ ДАМПЫ (ТРАНСПОРТНЫЙ УРОВЕНЬ ПШУ) ===")
-    print("--- Пакеты Синхронизации (OSC Bundle -> DSP UDP) ---")
-    print(pshu.cmd('grep -m 10 "10.0.0.1.8000 > 10.0.0.2.8000\\|10.0.0.2.* > 10.0.0.3.9000" /tmp/pshu_network.log || true').strip())
-    print("\n--- Пакеты Автовосстановления и Профиля (TCP Handshake -> PPP) ---")
-    print(pshu.cmd('grep "10.0.0.4.9001" /tmp/pshu_network.log | tail -n 10').strip())
-
-    print("="*80 + "\n")
-
-    pshu.cmd('pkill -f "python3 main.py" || true')
-    client.cmd('pkill -f "fake_ntp.py" || true')
-    dsp1.cmd('pkill -f "mock_device_udp.py" || true')
-    ppp1.cmd('pkill -f "mock_ppp_tcp_device.py" || true')
-    dsp1.cmd('pkill -f "telemetry_gen.py" || true')
-    client.cmd('pkill -f "telemetry_sink.py" || true')
-    pshu.cmd('pkill -f tcpdump || true')
-    net.stop()
-
-if __name__ == '__main__':
-    run()
+    print(" ОТЧЕТ О ТЕ
