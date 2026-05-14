@@ -64,6 +64,40 @@ class TCPCommandClient:
         self.host = host
         self.port = port
         self.policy = policy
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
+        self._lock = asyncio.Lock()
+
+    async def _connect(self) -> None:
+        if self._writer is not None and not self._writer.is_closing():
+            return
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.policy.retries + 1):
+            try:
+                self._reader, self._writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, self.port), 
+                    timeout=self.policy.timeout_sec
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                if attempt < self.policy.retries:
+                    await asyncio.sleep(self.policy.retry_backoff_sec * (attempt + 1))
+        
+        self._reader = None
+        self._writer = None
+        raise ConnectionError(f"TCP connect failed: {last_exc}")
+
+    async def _disconnect(self) -> None:
+        if self._writer:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except Exception:
+                pass
+        self._reader = None
+        self._writer = None
 
     async def send_line(self, payload: bytes) -> None:
         await self._send(payload + b"\n")
@@ -73,23 +107,15 @@ class TCPCommandClient:
         await self._send(header + payload)
 
     async def _send(self, payload: bytes) -> None:
-        last_exc: Optional[Exception] = None
-        for attempt in range(self.policy.retries + 1):
+        async with self._lock:
+            await self._connect()
+            
             try:
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(self.host, self.port), 
-                    timeout=self.policy.timeout_sec
-                )
-                writer.write(payload)
-                await asyncio.wait_for(writer.drain(), timeout=self.policy.timeout_sec)
-                writer.close()
-                await writer.wait_closed()
-                return
+                self._writer.write(payload)
+                await asyncio.wait_for(self._writer.drain(), timeout=self.policy.timeout_sec)
             except Exception as exc:
-                last_exc = exc
-                if attempt < self.policy.retries:
-                    await asyncio.sleep(self.policy.retry_backoff_sec * (attempt + 1))
-        raise RuntimeError(f"TCP send failed after retries: {last_exc}")
+                await self._disconnect()
+                raise ConnectionError(f"TCP write failed (Broken Pipe/Timeout): {exc}") from exc
 
 
 def _strip_prefix(address: str, prefix: str) -> str:
